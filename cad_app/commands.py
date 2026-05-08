@@ -518,13 +518,44 @@ def move_edge_controlled(
     dy: float,
     dz: float,
 ) -> TopoDS_Shape:
-    """Move both vertices of an edge on a simple convex planar solid."""
+    """Move an edge by selecting the adjacent face most aligned with the
+    move direction and applying a face extrude (boolean push/pull)."""
     _validate_move_vector(dx, dy, dz)
     validate_shape(shape)
     edge = _edge_by_index(shape, edge_index)
     _assert_sharp_planar_edge(shape, edge)
-    moved_vertex_indexes = _edge_vertex_indexes(shape, edge)
-    return _move_vertices_by_convex_rebuild(shape, moved_vertex_indexes, (dx, dy, dz))
+
+    faces = _edge_adjacent_faces(shape, edge)
+    if len(faces) != 2:
+        raise UnsupportedTopologyError(
+            "Edge operation requires exactly two adjacent faces."
+        )
+
+    face_map = Picker.indexed_map(shape, SelectionKind.FACE)
+    move_dir = (dx, dy, dz)
+    best_face_index = 0
+    best_dot = -1.0
+    best_normal = None
+
+    for face in faces:
+        normal = _planar_face_normal(face)
+        n = (normal.X(), normal.Y(), normal.Z())
+        dot = abs(n[0] * move_dir[0] + n[1] * move_dir[1] + n[2] * move_dir[2])
+        if dot > best_dot:
+            best_dot = dot
+            idx = face_map.FindIndex(face)
+            if idx > 0:
+                best_face_index = idx
+                best_normal = n
+
+    if best_face_index == 0 or best_normal is None:
+        raise UnsupportedTopologyError("Could not find matching face for edge move.")
+
+    distance = (dx * dx + dy * dy + dz * dz) ** 0.5
+    aligned = dx * best_normal[0] + dy * best_normal[1] + dz * best_normal[2]
+    signed_distance = distance * (1.0 if aligned >= 0 else -1.0)
+
+    return extrude_face(shape, best_face_index, signed_distance)
 
 
 def apply_move_edge_controlled(
