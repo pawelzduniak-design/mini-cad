@@ -416,8 +416,8 @@ class Viewer:
         label = AIS_TextLabel()
         label.SetText(TCollection_ExtendedString(text))
         label.SetPosition(gp_Pnt(*position))
-        label.SetHeight(14.0)
-        label.SetColor(Quantity_Color(*theme.PREVIEW_BLUE, Quantity_TOC_RGB))
+        label.SetHeight(16.0)
+        label.SetColor(Quantity_Color(*theme.DIMENSION_LABEL, Quantity_TOC_RGB))
         if hasattr(label, "SetZLayer"):
             from OCP.Graphic3d import Graphic3d_ZLayerId_Topmost
 

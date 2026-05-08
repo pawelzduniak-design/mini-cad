@@ -427,3 +427,39 @@ def test_orientation_gizmo_hit_region_is_bottom_right() -> None:
     assert widget._is_in_orientation_gizmo(left + size // 2, top + size // 2)
     assert not widget._is_in_orientation_gizmo(20, 20)
     assert widget._orientation_gizmo_axis_at(left + size // 2, top + 5) == "z"
+
+
+def test_view_drag_snap_rounds_to_grid() -> None:
+    pytest.importorskip("OCP")
+    pytest.importorskip("PySide6")
+
+    from PySide6.QtWidgets import QApplication
+
+    from cad_app.engine import make_box
+    from cad_app.main_window import MoveSession, create_main_window
+    from cad_app.scene import Scene
+    from cad_app.viewer import Viewer
+
+    QApplication.instance() or QApplication([])
+    scene = Scene()
+    item_id = scene.add_shape(make_box(40, 40, 40))
+    main_window = create_main_window(Viewer(), scene)
+
+    session = MoveSession(
+        tool="move",
+        target_kind="object",
+        item_id=item_id,
+        index=None,
+        axis_name="X",
+        axis=(1.0, 0.0, 0.0),
+        drag_start=(0, 0),
+        drag_origin_distance=0.0,
+        drag_screen_axis=None,
+        distance=0.0,
+    )
+    main_window.viewer_widget._move_session = session
+    main_window.viewer_widget._move_pixels_to_units = 0.2
+
+    main_window.viewer_widget._drag_move_to(50, 0, snap=True)
+
+    assert session.distance == pytest.approx(10.0)

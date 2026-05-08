@@ -347,7 +347,8 @@ def create_main_window(viewer: Viewer, scene: Scene | None = None) -> MainWindow
                 return
             if self._move_session is not None and event.buttons() & Qt.LeftButton:
                 fine = bool(event.modifiers() & Qt.ShiftModifier)
-                self._drag_move_to(position.x(), position.y(), fine=fine)
+                snap = bool(event.modifiers() & Qt.ControlModifier)
+                self._drag_move_to(position.x(), position.y(), fine=fine, snap=snap)
                 event.accept()
                 return
             if self._sketch_session is not None and event.buttons() & Qt.LeftButton:
@@ -2119,7 +2120,9 @@ def create_main_window(viewer: Viewer, scene: Scene | None = None) -> MainWindow
             else:
                 self._show_status("Move preview")
 
-        def _drag_move_to(self, x: int, y: int, fine: bool = False) -> None:
+        def _drag_move_to(
+            self, x: int, y: int, fine: bool = False, snap: bool = False
+        ) -> None:
             if self._move_session is None or self._move_session.drag_start is None:
                 return
             if self._move_session.axis_name == "View":
@@ -2140,6 +2143,12 @@ def create_main_window(viewer: Viewer, scene: Scene | None = None) -> MainWindow
                         component * component for component in self._move_session.vector
                     )
                 )
+                if snap:
+                    snapped = tuple(
+                        round(c / 10.0) * 10.0 for c in self._move_session.vector
+                    )
+                    self._move_session.vector = snapped
+                    self._move_session.distance = math.sqrt(sum(c * c for c in snapped))
                 self._update_move_preview()
                 self._show_dimension_overlay(
                     self._move_overlay_label(self._move_session),
@@ -2162,6 +2171,10 @@ def create_main_window(viewer: Viewer, scene: Scene | None = None) -> MainWindow
             )
             if self._move_session.tool in {"fillet", "chamfer"}:
                 self._move_session.distance = max(0.0, self._move_session.distance)
+            if snap:
+                self._move_session.distance = (
+                    round(self._move_session.distance / 10.0) * 10.0
+                )
             self._update_move_preview()
             self._update_extrude_affordance()
             self._show_dimension_overlay(

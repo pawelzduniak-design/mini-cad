@@ -549,3 +549,41 @@ def test_edge_and_vertex_moves_reject_curved_topology() -> None:
             dy=0,
             dz=10,
         )
+
+
+def test_move_edge_preserves_two_bodies_in_scene() -> None:
+    _skip_without_cad_dependencies()
+
+    from OCP.Bnd import Bnd_Box
+    from OCP.BRepBndLib import BRepBndLib
+
+    from cad_app.commands import (
+        apply_move_edge_controlled,
+        translated_shape,
+    )
+    from cad_app.engine import make_box
+    from cad_app.scene import Scene
+    from cad_app.types import SelectionKind, SelectionRef
+
+    scene = Scene()
+    lower_id = scene.add_shape(make_box(80.0, 80.0, 40.0), meta={"kind": "body"})
+    upper_shape = translated_shape(make_box(40.0, 30.0, 20.0), 0.0, 0.0, 40.0)
+    upper_id = scene.add_shape(upper_shape, meta={"kind": "body"})
+    scene.set_selection(
+        SelectionRef(item_id=upper_id, kind=SelectionKind.EDGE, index=2)
+    )
+
+    apply_move_edge_controlled(scene, upper_id, 2, 5.0, 0.0, 0.0)
+
+    assert len(scene) == 2
+    assert lower_id in scene
+    assert upper_id in scene
+
+    lower_bounds = Bnd_Box()
+    BRepBndLib.Add_s(scene.get(lower_id).shape, lower_bounds)
+    assert lower_bounds.Get()[3] == pytest.approx(40.0, abs=1e-4)
+
+    upper_bounds = Bnd_Box()
+    BRepBndLib.Add_s(scene.get(upper_id).shape, upper_bounds)
+    assert upper_bounds.Get()[2] == pytest.approx(40.0, abs=1e-4)
+    assert upper_bounds.Get()[3] > 20
