@@ -994,3 +994,226 @@ def _bounds(shape) -> tuple[float, float, float, float, float, float]:
     bounds = Bnd_Box()
     BRepBndLib.Add_s(shape, bounds)
     return bounds.Get()
+
+
+def test_real_qt_edge_move_drag_changes_volume_and_keeps_valid_shape() -> None:
+    pytest.importorskip("OCP")
+    pytest.importorskip("PySide6")
+
+    from OCP.BRepCheck import BRepCheck_Analyzer
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    from cad_app.engine import make_box
+    from cad_app.main_window import create_main_window
+    from cad_app.scene import Scene
+    from cad_app.types import SelectionKind
+    from cad_app.viewer import Viewer
+
+    app = QApplication.instance() or QApplication([])
+    scene = Scene()
+    scene.add_shape(make_box(40, 40, 40))
+    viewer = Viewer()
+    main_window = create_main_window(viewer, scene)
+    widget = main_window.viewer_widget
+    main_window.window.show()
+    widget.setFocus()
+
+    try:
+        _wait_for_initial_display(app, viewer, widget)
+        scene.get(scene.active_item_id()).meta[
+            "test_device_pixel_ratio"
+        ] = widget.devicePixelRatioF()
+        item_id = scene.active_item_id()
+        before_vol = _volume(scene.get(item_id).shape)
+
+        QTest.keyClick(widget, Qt.Key_3)
+        app.processEvents()
+        probe = _first_clickable_probe(
+            widget,
+            main_window.picker,
+            viewer,
+            SelectionKind.EDGE,
+            _edge_midpoint_probes(viewer.view, scene),
+        )
+
+        QTest.mouseClick(
+            widget,
+            Qt.LeftButton,
+            Qt.NoModifier,
+            QPoint(probe.logical_x, probe.logical_y),
+        )
+        app.processEvents()
+        assert scene.selection() is not None
+        assert scene.selection().kind == SelectionKind.EDGE
+
+        QTest.keyClick(widget, Qt.Key_G)
+        app.processEvents()
+        assert widget._move_session is not None
+        assert widget._move_session.target_kind == SelectionKind.EDGE
+        assert "Tool: Move" in widget._hud_labels["tool"].text()
+
+        start = QPoint(200, 200)
+        QTest.mousePress(widget, Qt.LeftButton, Qt.NoModifier, start)
+        app.processEvents()
+        end = QPoint(start.x() + 60, start.y())
+        QTest.mouseMove(widget, end)
+        app.processEvents()
+        assert viewer._preview_marker is not None
+        QTest.mouseRelease(widget, Qt.LeftButton, Qt.NoModifier, end)
+        app.processEvents()
+
+        assert widget._move_session is None
+        after_vol = _volume(scene.get(item_id).shape)
+        assert after_vol != pytest.approx(before_vol)
+        assert BRepCheck_Analyzer(scene.get(item_id).shape).IsValid()
+    finally:
+        main_window.window.close()
+        viewer.close()
+
+
+def test_real_qt_edge_move_body_visible_during_drag() -> None:
+    pytest.importorskip("OCP")
+    pytest.importorskip("PySide6")
+
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    from cad_app.engine import make_box
+    from cad_app.main_window import create_main_window
+    from cad_app.scene import Scene
+    from cad_app.types import SelectionKind
+    from cad_app.viewer import Viewer
+
+    app = QApplication.instance() or QApplication([])
+    scene = Scene()
+    scene.add_shape(make_box(40, 40, 40))
+    viewer = Viewer()
+    main_window = create_main_window(viewer, scene)
+    widget = main_window.viewer_widget
+    main_window.window.show()
+    widget.setFocus()
+
+    try:
+        _wait_for_initial_display(app, viewer, widget)
+        scene.get(scene.active_item_id()).meta[
+            "test_device_pixel_ratio"
+        ] = widget.devicePixelRatioF()
+        item_id = scene.active_item_id()
+
+        QTest.keyClick(widget, Qt.Key_3)
+        app.processEvents()
+        probe = _first_clickable_probe(
+            widget,
+            main_window.picker,
+            viewer,
+            SelectionKind.EDGE,
+            _edge_midpoint_probes(viewer.view, scene),
+        )
+        QTest.mouseClick(
+            widget,
+            Qt.LeftButton,
+            Qt.NoModifier,
+            QPoint(probe.logical_x, probe.logical_y),
+        )
+        app.processEvents()
+
+        QTest.keyClick(widget, Qt.Key_G)
+        app.processEvents()
+        assert widget._move_session is not None
+
+        start = QPoint(200, 200)
+        QTest.mousePress(widget, Qt.LeftButton, Qt.NoModifier, start)
+        end = QPoint(start.x() + 40, start.y())
+        QTest.mouseMove(widget, end)
+        app.processEvents()
+
+        assert item_id in viewer._ais_map
+        assert item_id not in viewer._preview_hidden_items
+
+        QTest.keyClick(widget, Qt.Key_Escape)
+        app.processEvents()
+        assert widget._move_session is None
+    finally:
+        main_window.window.close()
+        viewer.close()
+
+
+def test_real_qt_edge_move_stacked_boxes_keep_both_bodies() -> None:
+    pytest.importorskip("OCP")
+    pytest.importorskip("PySide6")
+
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    from cad_app.commands import translated_shape
+    from cad_app.engine import make_box
+    from cad_app.main_window import create_main_window
+    from cad_app.scene import Scene
+    from cad_app.types import SelectionKind
+    from cad_app.viewer import Viewer
+
+    app = QApplication.instance() or QApplication([])
+    scene = Scene()
+    lower_id = scene.add_shape(make_box(80, 80, 40), meta={"kind": "body"})
+    upper_shape = translated_shape(make_box(40, 30, 20), 0.0, 0.0, 40.0)
+    upper_id = scene.add_shape(upper_shape, meta={"kind": "body"})
+    scene.set_active_item(upper_id)
+
+    viewer = Viewer()
+    main_window = create_main_window(viewer, scene)
+    widget = main_window.viewer_widget
+    main_window.window.show()
+    widget.setFocus()
+
+    try:
+        _wait_for_initial_display(app, viewer, widget)
+        scene.get(upper_id).meta["test_device_pixel_ratio"] = widget.devicePixelRatioF()
+
+        QTest.keyClick(widget, Qt.Key_3)
+        app.processEvents()
+        probe = _first_clickable_probe(
+            widget,
+            main_window.picker,
+            viewer,
+            SelectionKind.EDGE,
+            _edge_midpoint_probes(viewer.view, scene),
+        )
+        QTest.mouseClick(
+            widget,
+            Qt.LeftButton,
+            Qt.NoModifier,
+            QPoint(probe.logical_x, probe.logical_y),
+        )
+        app.processEvents()
+        assert scene.selection() is not None
+        assert scene.selection().item_id == upper_id
+        assert scene.selection().kind == SelectionKind.EDGE
+
+        QTest.keyClick(widget, Qt.Key_G)
+        app.processEvents()
+        assert widget._move_session is not None
+
+        start = QPoint(200, 200)
+        QTest.mousePress(widget, Qt.LeftButton, Qt.NoModifier, start)
+        end = _active_tool_drag_end(widget, start)
+        QTest.mouseMove(widget, end)
+        app.processEvents()
+        assert viewer._preview_marker is not None
+        QTest.mouseRelease(widget, Qt.LeftButton, Qt.NoModifier, end)
+        app.processEvents()
+
+        assert widget._move_session is None
+        assert len(scene) == 2
+        assert lower_id in scene
+        assert upper_id in scene
+        assert _volume(scene.get(upper_id).shape) != pytest.approx(_volume(upper_shape))
+        assert _volume(scene.get(lower_id).shape) == pytest.approx(
+            _volume(make_box(80, 80, 40))
+        )
+    finally:
+        main_window.window.close()
+        viewer.close()

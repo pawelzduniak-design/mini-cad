@@ -518,11 +518,21 @@ def move_edge_controlled(
     dy: float,
     dz: float,
 ) -> TopoDS_Shape:
-    """Move both vertices of an edge on a simple convex planar solid."""
+    """Move both vertices of an edge on a simple convex planar solid.
+
+    Convex hull vertex rebuild is used for single-axis moves.
+    Multi-axis vectors (e.g. View-drag) are routed through a
+    safer face-extrude path to avoid InvalidShapeError.
+    """
     _validate_move_vector(dx, dy, dz)
     validate_shape(shape)
     edge = _edge_by_index(shape, edge_index)
     _assert_sharp_planar_edge(shape, edge)
+
+    axis_count = sum(1 for c in (dx, dy, dz) if abs(c) > 1e-9)
+    if axis_count > 1:
+        return _move_edge_via_best_face(shape, edge_index, edge, dx, dy, dz)
+
     moved_vertex_indexes = _edge_vertex_indexes(shape, edge)
     return _move_vertices_by_convex_rebuild(shape, moved_vertex_indexes, (dx, dy, dz))
 
@@ -1212,3 +1222,41 @@ def _workplane_from_face(face: TopoDS_Face):
     from cad_app.workplane import Workplane
 
     return Workplane.from_face(face)
+
+
+def _move_edge_via_best_face(
+    shape: TopoDS_Shape,
+    edge_index: int,
+    edge: TopoDS_Edge,
+    dx: float,
+    dy: float,
+    dz: float,
+) -> TopoDS_Shape:
+    faces = _edge_adjacent_faces(shape, edge)
+    if len(faces) != 2:
+        raise UnsupportedTopologyError(
+            "Edge operation requires exactly two adjacent faces."
+        )
+
+    move_dir = (dx, dy, dz)
+    face_map = Picker.indexed_map(shape, SelectionKind.FACE)
+    best_face_index = 0
+    best_dot = -1.0
+    best_proj = 0.0
+
+    for face in faces:
+        normal = _planar_face_normal(face)
+        n = (normal.X(), normal.Y(), normal.Z())
+        proj = move_dir[0] * n[0] + move_dir[1] * n[1] + move_dir[2] * n[2]
+        if abs(proj) > best_dot:
+            best_dot = abs(proj)
+            idx = face_map.FindIndex(face)
+            if idx > 0:
+                best_face_index = idx
+                best_proj = proj
+
+    if best_face_index == 0 or abs(best_proj) < 1e-9:
+        moved_vertex_indexes = _edge_vertex_indexes(shape, edge_index)
+        return _move_vertices_by_convex_rebuild(shape, moved_vertex_indexes, move_dir)
+
+    return extrude_face(shape, best_face_index, best_proj)
