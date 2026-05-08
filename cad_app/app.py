@@ -51,7 +51,40 @@ def configure_logging() -> Path:
     root_logger.handlers.clear()
     root_logger.addHandler(console_handler)
     root_logger.addHandler(file_handler)
+
+    _redirect_occt_messages()
+
     return log_path
+
+
+def _redirect_occt_messages() -> None:
+    try:
+        from OCP.Message import (
+            Message_Gravity,
+            Message_Messenger,
+            Message_Printer,
+        )
+        from OCP.TCollection import TCollection_AsciiString
+
+        occt_logger = logging.getLogger("OCP")
+
+        class PyMessagePrinter(Message_Printer):
+            def send(self, text, gravity, put_endline):
+                msg = str(TCollection_AsciiString(text).ToCString())
+                msg = msg.rstrip("\n")
+                level = {
+                    Message_Gravity.Message_INFO: logging.DEBUG,
+                    Message_Gravity.Message_WARNING: logging.WARNING,
+                    Message_Gravity.Message_ALARM: logging.ERROR,
+                    Message_Gravity.Message_FAIL: logging.ERROR,
+                }.get(gravity, logging.DEBUG)
+                occt_logger.log(level, msg)
+
+        printer = PyMessagePrinter()
+        messenger = Message_Messenger.DefaultMessenger()
+        messenger.AddPrinter(printer)
+    except Exception:
+        pass
 
 
 def create_initial_scene() -> Scene:
