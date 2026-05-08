@@ -725,9 +725,7 @@ def test_edge_move_on_sketch_extruded_body_creates_wedge() -> None:
     profile = make_center_rectangle_profile(wp, (0, 0), (50, 30))
     profile_face = TopoDS.Face_s(profile)
     upper_shape = extrude_profile(profile_face, 60)
-    scene.add_shape(
-        upper_shape, meta={"kind": "body", "source": "sketch_new_body"}
-    )
+    scene.add_shape(upper_shape, meta={"kind": "body", "source": "sketch_new_body"})
 
     vm_before = Picker.indexed_map(upper_shape, SelectionKind.VERTEX)
     before_set = set()
