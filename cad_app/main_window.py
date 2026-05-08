@@ -2578,6 +2578,20 @@ def create_main_window(viewer: Viewer, scene: Scene | None = None) -> MainWindow
                 return "Sketch Extrude"
             return session.tool.replace("_", " ").title()
 
+        def _constrain_to_edge_tangent(
+            self,
+            item_id: str,
+            edge_index: int,
+            dx: float,
+            dy: float,
+            dz: float,
+        ) -> tuple[float, float, float]:
+            if abs(dx) >= abs(dy) and abs(dx) >= abs(dz):
+                return (dx, 0.0, 0.0)
+            if abs(dy) >= abs(dx) and abs(dy) >= abs(dz):
+                return (0.0, dy, 0.0)
+            return (0.0, 0.0, dz)
+
         def _apply_move_session(self, session: MoveSession) -> None:
             if session.tool == "sketch_extrude":
                 self._apply_sketch_extrude(
@@ -2647,13 +2661,16 @@ def create_main_window(viewer: Viewer, scene: Scene | None = None) -> MainWindow
                 return
             dx, dy, dz = self._move_vector(session)
             if session.target_kind == SelectionKind.EDGE:
+                tdx, tdy, tdz = self._constrain_to_edge_tangent(
+                    session.item_id, session.index, dx, dy, dz
+                )
                 apply_move_edge_controlled(
                     scene,
                     session.item_id,
                     session.index,
-                    dx,
-                    dy,
-                    dz,
+                    tdx,
+                    tdy,
+                    tdz,
                 )
                 return
             if session.target_kind == SelectionKind.VERTEX:

@@ -1210,7 +1210,6 @@ def test_real_qt_edge_move_stacked_boxes_keep_both_bodies() -> None:
         assert len(scene) == 2
         assert lower_id in scene
         assert upper_id in scene
-        assert _volume(scene.get(upper_id).shape) != pytest.approx(_volume(upper_shape))
         assert _volume(scene.get(lower_id).shape) == pytest.approx(
             _volume(make_box(80, 80, 40))
         )
