@@ -518,53 +518,13 @@ def move_edge_controlled(
     dy: float,
     dz: float,
 ) -> TopoDS_Shape:
-    """Move an edge by projecting the move vector onto each adjacent
-    face's normal and applying face extrude to both faces."""
+    """Move both vertices of an edge on a simple convex planar solid."""
     _validate_move_vector(dx, dy, dz)
     validate_shape(shape)
     edge = _edge_by_index(shape, edge_index)
     _assert_sharp_planar_edge(shape, edge)
-
-    faces = _edge_adjacent_faces(shape, edge)
-    if len(faces) != 2:
-        raise UnsupportedTopologyError(
-            "Edge operation requires exactly two adjacent faces."
-        )
-
-    move_dir = (dx, dy, dz)
-    projections: list[tuple[tuple[float, float, float], float]] = []
-    for face in faces:
-        normal = _planar_face_normal(face)
-        n = (normal.X(), normal.Y(), normal.Z())
-        proj = dx * n[0] + dy * n[1] + dz * n[2]
-        if abs(proj) > 1e-9:
-            projections.append((n, proj))
-
-    if not projections:
-        moved_vertex_indexes = _edge_vertex_indexes(shape, edge)
-        return _move_vertices_by_convex_rebuild(shape, moved_vertex_indexes, move_dir)
-
-    from OCP.TopoDS import TopoDS
-
-    result = shape
-    for _normal, proj_distance in projections:
-        face_map = Picker.indexed_map(result, SelectionKind.FACE)
-        best_face_index = 0
-        for i in range(1, face_map.Extent() + 1):
-            face = TopoDS.Face_s(face_map.FindKey(i))
-            try:
-                fnormal = _planar_face_normal(face)
-                fn = (fnormal.X(), fnormal.Y(), fnormal.Z())
-                if _vectors_parallel(fn, _normal):
-                    best_face_index = i
-                    break
-            except UnsupportedTopologyError:
-                continue
-        if best_face_index == 0:
-            continue
-        result = extrude_face(result, best_face_index, proj_distance)
-
-    return result
+    moved_vertex_indexes = _edge_vertex_indexes(shape, edge)
+    return _move_vertices_by_convex_rebuild(shape, moved_vertex_indexes, (dx, dy, dz))
 
 
 def apply_move_edge_controlled(
@@ -1252,10 +1212,3 @@ def _workplane_from_face(face: TopoDS_Face):
     from cad_app.workplane import Workplane
 
     return Workplane.from_face(face)
-
-
-def _vectors_parallel(
-    a: tuple[float, float, float],
-    b: tuple[float, float, float],
-) -> bool:
-    return abs(a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) > 0.9999
