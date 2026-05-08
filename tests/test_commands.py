@@ -693,3 +693,86 @@ def test_move_top_front_edge_creates_slanted_box_not_resized_box() -> None:
     assert props.Mass() != pytest.approx(_volume(upper), rel=1e-6)
 
     assert _volume(base) == pytest.approx(200 * 160 * 40)
+
+
+def test_edge_move_on_sketch_extruded_body_creates_wedge() -> None:
+    _skip_without_cad_dependencies()
+
+    from OCP.BRep import BRep_Tool
+    from OCP.BRepAdaptor import BRepAdaptor_Curve
+    from OCP.BRepCheck import BRepCheck_Analyzer
+    from OCP.gp import gp_Dir, gp_Pnt
+    from OCP.TopoDS import TopoDS
+
+    from cad_app.commands import move_edge_controlled
+    from cad_app.engine import make_box
+    from cad_app.picker import Picker
+    from cad_app.scene import Scene
+    from cad_app.sketch import extrude_profile, make_center_rectangle_profile
+    from cad_app.types import SelectionKind
+    from cad_app.workplane import Workplane
+
+    scene = Scene()
+    base = make_box(200, 160, 40)
+    scene.add_shape(base, meta={"kind": "body"})
+
+    wp = Workplane(
+        origin=gp_Pnt(0, 0, 40),
+        normal=gp_Dir(0, 0, 1),
+        x_direction=gp_Dir(1, 0, 0),
+        y_direction=gp_Dir(0, 1, 0),
+    )
+    profile = make_center_rectangle_profile(wp, (0, 0), (50, 30))
+    profile_face = TopoDS.Face_s(profile)
+    upper_shape = extrude_profile(profile_face, 60)
+    scene.add_shape(
+        upper_shape, meta={"kind": "body", "source": "sketch_new_body"}
+    )
+
+    vm_before = Picker.indexed_map(upper_shape, SelectionKind.VERTEX)
+    before_set = set()
+    for i in range(1, vm_before.Extent() + 1):
+        p = BRep_Tool.Pnt_s(TopoDS.Vertex_s(vm_before.FindKey(i)))
+        before_set.add((round(p.X(), 6), round(p.Y(), 6), round(p.Z(), 6)))
+
+    target = None
+    em = Picker.indexed_map(upper_shape, SelectionKind.EDGE)
+    for idx in range(1, em.Extent() + 1):
+        edge = TopoDS.Edge_s(em.FindKey(idx))
+        c = BRepAdaptor_Curve(edge)
+        s = c.Value(c.FirstParameter())
+        e = c.Value(c.LastParameter())
+        if (
+            abs(s.Z() - e.Z()) < 0.1
+            and min(s.Z(), e.Z()) > 95
+            and min(s.Y(), e.Y()) < -25
+        ):
+            target = idx
+            break
+
+    assert target is not None, "Could not find top-front edge of upper body"
+
+    result = move_edge_controlled(upper_shape, target, 0, 0, -30)
+
+    assert BRepCheck_Analyzer(result).IsValid()
+
+    after_vm = Picker.indexed_map(result, SelectionKind.VERTEX)
+    after_set = set()
+    for i in range(1, after_vm.Extent() + 1):
+        p = BRep_Tool.Pnt_s(TopoDS.Vertex_s(after_vm.FindKey(i)))
+        after_set.add((round(p.X(), 6), round(p.Y(), 6), round(p.Z(), 6)))
+
+    changed = after_set - before_set
+    unchanged = before_set & after_set
+
+    assert len(changed) == 2, f"Expected 2 vertices moved, got {len(changed)}"
+    assert len(unchanged) == 6, f"Expected 6 vertices unchanged, got {len(unchanged)}"
+
+    for v in changed:
+        assert v[2] == pytest.approx(70.0), f"Expected z=70, got z={v[2]:.1f}"
+
+    result_fm = Picker.indexed_map(result, SelectionKind.FACE)
+    assert result_fm.Extent() == 6
+
+    assert abs(_volume(result)) == pytest.approx(270000)
+    assert _volume(base) == pytest.approx(200 * 160 * 40)
