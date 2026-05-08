@@ -2578,6 +2578,38 @@ def create_main_window(viewer: Viewer, scene: Scene | None = None) -> MainWindow
                 return "Sketch Extrude"
             return session.tool.replace("_", " ").title()
 
+        def _project_onto_edge_tangent(
+            self,
+            item_id: str,
+            edge_index: int,
+            dx: float,
+            dy: float,
+            dz: float,
+        ) -> tuple[float, float, float]:
+            from OCP.BRepAdaptor import BRepAdaptor_Curve
+            from OCP.TopoDS import TopoDS
+
+            edge = TopoDS.Edge_s(
+                picker.subshape(item_id, SelectionKind.EDGE, edge_index)
+            )
+            curve = BRepAdaptor_Curve(edge)
+            first = curve.FirstParameter()
+            last = curve.LastParameter()
+            start = curve.Value(first)
+            end = curve.Value(last)
+            tx = end.X() - start.X()
+            ty = end.Y() - start.Y()
+            tz = end.Z() - start.Z()
+            length_sq = tx * tx + ty * ty + tz * tz
+            if length_sq < 1e-14:
+                return dx, dy, dz
+            length = length_sq**0.5
+            tx /= length
+            ty /= length
+            tz /= length
+            dot = dx * tx + dy * ty + dz * tz
+            return dot * tx, dot * ty, dot * tz
+
         def _apply_move_session(self, session: MoveSession) -> None:
             if session.tool == "sketch_extrude":
                 self._apply_sketch_extrude(
@@ -2647,13 +2679,16 @@ def create_main_window(viewer: Viewer, scene: Scene | None = None) -> MainWindow
                 return
             dx, dy, dz = self._move_vector(session)
             if session.target_kind == SelectionKind.EDGE:
+                tdx, tdy, tdz = self._project_onto_edge_tangent(
+                    session.item_id, session.index, dx, dy, dz
+                )
                 apply_move_edge_controlled(
                     scene,
                     session.item_id,
                     session.index,
-                    dx,
-                    dy,
-                    dz,
+                    tdx,
+                    tdy,
+                    tdz,
                 )
                 return
             if session.target_kind == SelectionKind.VERTEX:
