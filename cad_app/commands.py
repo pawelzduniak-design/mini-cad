@@ -706,18 +706,127 @@ def _move_vertices_by_convex_rebuild(
     vector: tuple[float, float, float],
 ) -> TopoDS_Shape:
     _assert_all_faces_planar(shape)
-    points = _shape_vertex_points(shape)
-    if len(points) < 4:
+    original_points = _shape_vertex_points(shape)
+    if len(original_points) < 4:
         raise UnsupportedTopologyError("Convex rebuild requires at least four points.")
 
     dx, dy, dz = vector
     moved_points = [
-        (x + dx, y + dy, z + dz) if index in moved_vertex_indexes else (x, y, z)
-        for index, (x, y, z) in enumerate(points, start=1)
+        (x + dx, y + dy, z + dz) if i in moved_vertex_indexes else (x, y, z)
+        for i, (x, y, z) in enumerate(original_points, start=1)
     ]
-    rebuilt = _build_convex_polyhedron(moved_points)
-    validate_shape(rebuilt)
-    return cleanup_shape(rebuilt)
+
+    vertex_map = Picker.indexed_map(shape, SelectionKind.VERTEX)
+    face_map = Picker.indexed_map(shape, SelectionKind.FACE)
+
+    from OCP.BRepBuilderAPI import (
+        BRepBuilderAPI_MakeFace,
+        BRepBuilderAPI_MakePolygon,
+        BRepBuilderAPI_MakeSolid,
+        BRepBuilderAPI_Sewing,
+    )
+    from OCP.gp import gp_Pnt
+    from OCP.TopoDS import TopoDS
+
+    sewing = BRepBuilderAPI_Sewing(1e-5)
+    for face_idx in range(1, face_map.Extent() + 1):
+        face = TopoDS.Face_s(face_map.FindKey(face_idx))
+        ordered_vi = _face_ordered_vertex_indices(face, vertex_map)
+        if len(ordered_vi) < 3:
+            raise UnsupportedTopologyError(
+                f"Face {face_idx} has fewer than 3 vertices."
+            )
+
+        if len(ordered_vi) == 3:
+            polygon = BRepBuilderAPI_MakePolygon()
+            for vi in ordered_vi:
+                pt = moved_points[vi - 1]
+                polygon.Add(gp_Pnt(*pt))
+            polygon.Close()
+            fb = BRepBuilderAPI_MakeFace(polygon.Wire(), True)
+            if not fb.IsDone():
+                raise UnsupportedTopologyError(f"Failed to rebuild face {face_idx}.")
+            sewing.Add(fb.Face())
+            continue
+
+        polygon = BRepBuilderAPI_MakePolygon()
+        for vi in ordered_vi:
+            pt = moved_points[vi - 1]
+            polygon.Add(gp_Pnt(*pt))
+        polygon.Close()
+        fb = BRepBuilderAPI_MakeFace(polygon.Wire(), True)
+        if fb.IsDone():
+            sewing.Add(fb.Face())
+        else:
+            for tri_idx in range(len(ordered_vi) - 2):
+                tri = [ordered_vi[0], ordered_vi[tri_idx + 1], ordered_vi[tri_idx + 2]]
+                tri_poly = BRepBuilderAPI_MakePolygon()
+                for vi in tri:
+                    tri_poly.Add(gp_Pnt(*moved_points[vi - 1]))
+                tri_poly.Close()
+                tri_fb = BRepBuilderAPI_MakeFace(tri_poly.Wire(), True)
+                if tri_fb.IsDone():
+                    sewing.Add(tri_fb.Face())
+
+    sewing.Perform()
+    shell = TopoDS.Shell_s(sewing.SewedShape())
+    solid_builder = BRepBuilderAPI_MakeSolid(shell)
+    solid = solid_builder.Solid()
+    validate_shape(solid)
+    return cleanup_shape(solid)
+
+
+def _face_ordered_vertex_indices(face, vertex_map) -> list[int]:
+    from OCP.BRep import BRep_Tool
+    from OCP.BRepAdaptor import BRepAdaptor_Curve
+    from OCP.TopAbs import TopAbs_EDGE, TopAbs_WIRE
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopoDS import TopoDS
+
+    outer_wire = None
+    wire_exp = TopExp_Explorer(face, TopAbs_WIRE)
+    if wire_exp.More():
+        outer_wire = wire_exp.Current()
+
+    if outer_wire is None:
+        raise UnsupportedTopologyError("Cannot extract outer wire from face.")
+
+    ordered_pts: list[tuple[float, float, float]] = []
+    seen = set()
+    edge_exp = TopExp_Explorer(outer_wire, TopAbs_EDGE)
+    while edge_exp.More():
+        edge = TopoDS.Edge_s(edge_exp.Current())
+        curve = BRepAdaptor_Curve(edge)
+        fp = curve.Value(curve.FirstParameter())
+        lp = curve.Value(curve.LastParameter())
+        for pt in ((fp.X(), fp.Y(), fp.Z()), (lp.X(), lp.Y(), lp.Z())):
+            key = (round(pt[0], 6), round(pt[1], 6), round(pt[2], 6))
+            if key not in seen:
+                ordered_pts.append(pt)
+                seen.add(key)
+        edge_exp.Next()
+
+    if not ordered_pts:
+        raise UnsupportedTopologyError("Face has no vertices in order.")
+
+    result = []
+    for pt in ordered_pts:
+        match = 0
+        for vi in range(1, vertex_map.Extent() + 1):
+            v = TopoDS.Vertex_s(vertex_map.FindKey(vi))
+            p = BRep_Tool.Pnt_s(v)
+            dist = (pt[0] - p.X()) ** 2 + (pt[1] - p.Y()) ** 2 + (pt[2] - p.Z()) ** 2
+            if dist < 1e-10:
+                match = vi
+                break
+        if match == 0:
+            raise UnsupportedTopologyError(
+                f"Vertex at ({pt[0]:.1f},{pt[1]:.1f},{pt[2]:.1f}) "
+                f"not found in shape vertex map."
+            )
+        result.append(match)
+
+    return result
 
 
 def _assert_all_faces_planar(shape: TopoDS_Shape) -> None:

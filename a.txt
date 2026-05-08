@@ -1,0 +1,106 @@
+Musimy naprawić zachowanie funkcji Move Edge w mojej aplikacji CAD Direct Modeling.
+
+Ważne:
+Gdy przesuwam jedną krawędź boxa, NIE chcę, żeby cały box pozostawał prostopadłościanem.
+Chcę lokalną deformację w stylu BRep.
+
+Oczekiwane zachowanie:
+Jeśli wybrana krawędź zostanie przesunięta, powinny przesunąć się tylko dwa wierzchołki należące do tej krawędzi.
+Wszystkie ściany połączone z tymi wierzchołkami/krawędzią powinny zostać przebudowane/zdeformowane.
+Cała reszta powinna zostać dokładnie tam, gdzie była.
+
+Konkretny przykład:
+Mam prostokątny górny box stojący na większym dolnym boxie/bazie.
+Wybieram górną przednią krawędź górnego boxa.
+Następnie przeciągam tę krawędź w dół wzdłuż osi Z.
+
+Oczekiwany rezultat:
+Górny obiekt nie może już być prostokątnym boxem.
+
+Powinien stać się pochylonym / ściętym boxem:
+
+- wybrana górna przednia krawędź przesuwa się w dół,
+- przeciwległa górna tylna krawędź zostaje na miejscu,
+- dół górnego boxa zostaje na miejscu,
+- przednia ściana staje się niższa,
+- górna ściana staje się pochylona,
+- lewa boczna ściana staje się trapezem,
+- prawa boczna ściana staje się trapezem,
+- tylna ściana zostaje bez zmian,
+- dolny box/baza nie może się w ogóle zmienić.
+
+To jest jak zrobienie prostego kształtu „domku z jednospadowym dachem”:
+box, w którym jedna górna krawędź została obniżona, tworząc pochyły dach.
+
+Błędne zachowanie:
+- Nie skaluj całego górnego boxa.
+- Nie przesuwaj całej górnej bryły.
+- Nie przebudowuj górnej bryły na podstawie jej bounding boxa.
+- Nie utrzymuj obiektu jako idealnego prostopadłościanu.
+- Nie zmieniaj dolnego obiektu/bazy.
+- Nie interpretuj tego jako zmianę rozmiaru feature/extrude.
+- Nie przesuwaj niewybranych wierzchołków.
+
+Reguła implementacyjna:
+Move Edge oznacza:
+1. Zidentyfikuj dwa końcowe wierzchołki wybranej krawędzi.
+2. Zastosuj przesunięcie drag delta tylko do tych dwóch wierzchołków.
+3. Przebuduj dotknięte ściany, używając nowych pozycji wierzchołków.
+4. Zachowaj pozycje wszystkich pozostałych wierzchołków.
+5. Zwróć poprawną bryłę.
+
+Dla tej operacji topologia powinna zasadniczo pozostać taka sama:
+- 8 wierzchołków,
+- 12 krawędzi,
+- 6 ścian,
+ale geometria ścian zmienia się, ponieważ jedna górna krawędź jest niżej.
+
+Dodaj automatyczny test regresyjny.
+
+Nazwa testu:
+test_move_top_front_edge_creates_slanted_box_not_resized_box
+
+Konfiguracja testu:
+1. Utwórz bazowy box, na przykład:
+   base = box 200 x 160 x 40
+
+2. Utwórz górny box na nim, na przykład:
+   upper = box 100 x 80 x 60
+   umieszczony na górze bazy
+
+3. Zapisz wszystkie pozycje wierzchołków przed operacją.
+
+4. Wybierz górną przednią krawędź górnego boxa.
+
+5. Zastosuj:
+   move_edge(edge, delta=(0, 0, -30))
+
+Oczekiwane asercje:
+- Dokładnie dwa wierzchołki wybranej krawędzi zmieniły pozycję.
+- Oba wierzchołki wybranej krawędzi mają Z zmniejszone o 30.
+- Ich współrzędne X i Y nie zmieniły się.
+- Przeciwległa górna tylna krawędź górnego boxa nie przesunęła się.
+- Wszystkie dolne wierzchołki górnego boxa nie przesunęły się.
+- Wszystkie wierzchołki dolnego boxa/bazy nie przesunęły się.
+- Długość wybranej krawędzi pozostała taka sama.
+- Górny kształt nadal jest poprawną bryłą.
+- Górny kształt nie jest już prostokątnym prostopadłościanem.
+- Górna ściana jest pochylona.
+- Dwie boczne ściany są trapezami.
+
+Wizualny test akceptacyjny:
+Utwórz scenę testową „mały domek z jednospadowym dachem”:
+- dolny duży box = dom/baza,
+- górny mniejszy box = blok dachu,
+- wybierz górną przednią krawędź górnego boxa,
+- przesuń ją w dół.
+
+Wyrenderowany rezultat musi wyglądać jak prosty domek/szopa z pochylonym dachem.
+Jeśli nadal wygląda jak normalny box, test jest oblany.
+Jeśli przesuwa się cały górny box, test jest oblany.
+Jeśli zmienia się dolna baza, test jest oblany.
+Jeśli dwie boczne ściany nie są trapezami, test jest oblany.
+Jeśli model staje się niepoprawny, test jest oblany.
+
+Nie rób tylko tak, żeby screenshot wyglądał poprawnie.
+Geometria ma być poprawna i zweryfikowana asercjami pozycji wierzchołków.
