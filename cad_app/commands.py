@@ -726,6 +726,7 @@ def _move_vertices_by_convex_rebuild(
         BRepBuilderAPI_Sewing,
     )
     from OCP.gp import gp_Pnt
+    from OCP.TopAbs import TopAbs_REVERSED
     from OCP.TopoDS import TopoDS
 
     sewing = BRepBuilderAPI_Sewing(1e-5)
@@ -737,6 +738,8 @@ def _move_vertices_by_convex_rebuild(
                 f"Face {face_idx} has fewer than 3 vertices."
             )
 
+        original_reversed = face.Orientation() == TopAbs_REVERSED
+
         if len(ordered_vi) == 3:
             polygon = BRepBuilderAPI_MakePolygon()
             for vi in ordered_vi:
@@ -746,7 +749,10 @@ def _move_vertices_by_convex_rebuild(
             fb = BRepBuilderAPI_MakeFace(polygon.Wire(), True)
             if not fb.IsDone():
                 raise UnsupportedTopologyError(f"Failed to rebuild face {face_idx}.")
-            sewing.Add(fb.Face())
+            new_face = fb.Face()
+            if original_reversed:
+                new_face.Orientation(TopAbs_REVERSED)
+            sewing.Add(new_face)
             continue
 
         polygon = BRepBuilderAPI_MakePolygon()
@@ -756,7 +762,10 @@ def _move_vertices_by_convex_rebuild(
         polygon.Close()
         fb = BRepBuilderAPI_MakeFace(polygon.Wire(), True)
         if fb.IsDone():
-            sewing.Add(fb.Face())
+            new_face = fb.Face()
+            if original_reversed:
+                new_face.Orientation(TopAbs_REVERSED)
+            sewing.Add(new_face)
         else:
             for tri_idx in range(len(ordered_vi) - 2):
                 tri = [ordered_vi[0], ordered_vi[tri_idx + 1], ordered_vi[tri_idx + 2]]
@@ -766,7 +775,10 @@ def _move_vertices_by_convex_rebuild(
                 tri_poly.Close()
                 tri_fb = BRepBuilderAPI_MakeFace(tri_poly.Wire(), True)
                 if tri_fb.IsDone():
-                    sewing.Add(tri_fb.Face())
+                    tri_face = tri_fb.Face()
+                    if original_reversed:
+                        tri_face.Orientation(TopAbs_REVERSED)
+                    sewing.Add(tri_face)
 
     sewing.Perform()
     shell = TopoDS.Shell_s(sewing.SewedShape())
