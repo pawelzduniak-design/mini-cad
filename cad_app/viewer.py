@@ -47,6 +47,7 @@ class Viewer:
         self._preview_marker: AIS_Shape | None = None
         self._extrude_affordance_marker: AIS_Shape | None = None
         self._dimension_label: Any | None = None
+        self._dimension_label_shadow: Any | None = None
         self._sketch_plane_marker: AIS_Shape | None = None
         self._grid_objects: list[Any] = []
         self._grid_enabled = True
@@ -258,11 +259,14 @@ class Viewer:
     def clear_dimension_label(self) -> None:
         if not self.is_initialized:
             self._dimension_label = None
+            self._dimension_label_shadow = None
             return
-        if self._dimension_label is None:
-            return
-        self.context.Remove(self._dimension_label, True)
-        self._dimension_label = None
+        if self._dimension_label is not None:
+            self.context.Remove(self._dimension_label, True)
+            self._dimension_label = None
+        if self._dimension_label_shadow is not None:
+            self.context.Remove(self._dimension_label_shadow, True)
+            self._dimension_label_shadow = None
 
     def clear_sketch_plane_marker(self) -> None:
         if not self.is_initialized:
@@ -348,6 +352,7 @@ class Viewer:
             return
         self.clear_preview_marker()
         if hide_item_id is not None:
+            LOGGER.debug("Preview marker: hiding original item_id=%s", hide_item_id)
             self._hide_item_for_preview(hide_item_id)
         self._preview_marker = self._display_marker(
             shape,
@@ -413,6 +418,19 @@ class Viewer:
         if not self.is_initialized:
             return
         self.clear_dimension_label()
+        shadow = AIS_TextLabel()
+        shadow.SetText(TCollection_ExtendedString(text))
+        shadow.SetPosition(gp_Pnt(*position))
+        shadow.SetHeight(16.0)
+        shadow.SetColor(Quantity_Color(0.06, 0.08, 0.10, Quantity_TOC_RGB))
+        if hasattr(shadow, "SetZLayer"):
+            from OCP.Graphic3d import Graphic3d_ZLayerId_Topmost
+
+            shadow.SetZLayer(Graphic3d_ZLayerId_Topmost)
+        self.context.Display(shadow, False)
+        self.context.Deactivate(shadow)
+        self._dimension_label_shadow = shadow
+
         label = AIS_TextLabel()
         label.SetText(TCollection_ExtendedString(text))
         label.SetPosition(gp_Pnt(*position))
@@ -601,22 +619,26 @@ class Viewer:
         ais = self._ais_map.get(item_id)
         if ais is not None:
             self.context.Erase(ais, False)
+            LOGGER.debug("Preview hide: erased ais item_id=%s from display", item_id)
         edge_ais = self._edge_map.get(item_id)
         if edge_ais is not None:
             self.context.Erase(edge_ais, False)
+            LOGGER.debug("Preview hide: erased edge overlay item_id=%s", item_id)
         self._preview_hidden_items.add(item_id)
 
     def _restore_preview_hidden_items(self) -> None:
         if not self.is_initialized:
             self._preview_hidden_items.clear()
             return
-        for item_id in self._preview_hidden_items:
+        for item_id in list(self._preview_hidden_items):
             ais = self._ais_map.get(item_id)
             if ais is not None:
                 self.context.Display(ais, False)
+                LOGGER.debug("Preview restore: re-displayed ais item_id=%s", item_id)
             edge_ais = self._edge_map.get(item_id)
             if edge_ais is not None:
                 self.context.Display(edge_ais, False)
+                LOGGER.debug("Preview restore: re-displayed edge item_id=%s", item_id)
         self._preview_hidden_items.clear()
 
     def _configure_initial_camera(self) -> None:

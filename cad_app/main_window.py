@@ -352,11 +352,13 @@ def create_main_window(viewer: Viewer, scene: Scene | None = None) -> MainWindow
                 event.accept()
                 return
             if self._sketch_session is not None and event.buttons() & Qt.LeftButton:
-                self._drag_sketch_to(position.x(), position.y())
+                snap = bool(event.modifiers() & Qt.ControlModifier)
+                self._drag_sketch_to(position.x(), position.y(), snap=snap)
                 event.accept()
                 return
             if self._sketch_session is not None:
-                self._preview_sketch_to(position.x(), position.y())
+                snap = bool(event.modifiers() & Qt.ControlModifier)
+                self._preview_sketch_to(position.x(), position.y(), snap=snap)
                 event.accept()
                 return
             if self._move_session is None:
@@ -1016,19 +1018,19 @@ def create_main_window(viewer: Viewer, scene: Scene | None = None) -> MainWindow
                 uv[1],
             )
 
-        def _drag_sketch_to(self, x: int, y: int) -> None:
+        def _drag_sketch_to(self, x: int, y: int, snap: bool = False) -> None:
             if self._sketch_session is None or self._sketch_session.start_uv is None:
                 return
             if self._sketch_session.drag_start_screen is not None:
                 self._sketch_session.drag_moved = (
                     math.dist(self._sketch_session.drag_start_screen, (x, y)) > 3.0
                 )
-            self._preview_sketch_to(x, y)
+            self._preview_sketch_to(x, y, snap=snap)
 
-        def _preview_sketch_to(self, x: int, y: int) -> None:
+        def _preview_sketch_to(self, x: int, y: int, snap: bool = False) -> None:
             if self._sketch_session is None:
                 return
-            uv = self._screen_to_sketch_uv(x, y)
+            uv = self._screen_to_sketch_uv(x, y, snap=snap)
             if uv is None:
                 self._viewer.clear_preview_marker()
                 self._hide_dimension_overlay()
@@ -1101,16 +1103,21 @@ def create_main_window(viewer: Viewer, scene: Scene | None = None) -> MainWindow
                 session.tool,
             )
 
-        def _screen_to_sketch_uv(self, x: int, y: int) -> tuple[float, float] | None:
+        def _screen_to_sketch_uv(
+            self, x: int, y: int, snap: bool = False
+        ) -> tuple[float, float] | None:
             if self._sketch_session is None:
                 return None
             view_x, view_y = self._to_view_pixels(x, y)
-            return project_screen_to_workplane(
+            uv = project_screen_to_workplane(
                 self._viewer.view,
                 view_x,
                 view_y,
                 self._sketch_session.workplane,
             )
+            if uv is not None and snap:
+                uv = (round(uv[0] / 10.0) * 10.0, round(uv[1] / 10.0) * 10.0)
+            return uv
 
         def _sketch_profile_from_uv(
             self,
@@ -2400,9 +2407,28 @@ def create_main_window(viewer: Viewer, scene: Scene | None = None) -> MainWindow
                 LOGGER.debug("Move preview failed: %s", exc, exc_info=True)
                 self._viewer.clear_preview_marker()
                 return
+            hide_original = self._move_session.tool in {
+                "extrude",
+                "sketch_extrude",
+                "fillet",
+                "chamfer",
+                "rotate",
+            } or (
+                self._move_session.tool == "move"
+                and self._move_session.target_kind == "object"
+            )
+            LOGGER.debug(
+                "Move preview: tool=%s target=%s hide_original=%s "
+                "item_id=%s distance=%.2f",
+                self._move_session.tool,
+                self._move_session.target_kind,
+                hide_original,
+                self._move_session.item_id,
+                self._move_session.distance,
+            )
             self._viewer.display_preview_marker(
                 preview,
-                hide_item_id=self._move_session.item_id,
+                hide_item_id=(self._move_session.item_id if hide_original else None),
             )
 
         @staticmethod
@@ -2488,6 +2514,17 @@ def create_main_window(viewer: Viewer, scene: Scene | None = None) -> MainWindow
                     status=f"{self._move_tool_name(session)} cancelled"
                 )
                 return
+            LOGGER.debug(
+                "Apply move session: tool=%s target=%s item_id=%s "
+                "index=%s distance=%.2f axis=%s vector=%s",
+                session.tool,
+                session.target_kind,
+                session.item_id,
+                session.index,
+                session.distance,
+                session.axis_name,
+                session.vector,
+            )
             try:
                 self._apply_move_session(session)
             except (CommandError, IndexError, ValueError) as exc:
