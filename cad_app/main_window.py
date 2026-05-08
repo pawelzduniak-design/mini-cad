@@ -3229,21 +3229,40 @@ def create_main_window(viewer: Viewer, scene: Scene | None = None) -> MainWindow
                     return self._workplane_point(self._sketch_session.workplane, uv)
             if self._move_session is not None and self._move_session.index is not None:
                 try:
-                    center = self._face_center(
+                    target_kind = (
+                        self._move_session.target_kind
+                        if isinstance(self._move_session.target_kind, SelectionKind)
+                        else SelectionKind(self._move_session.target_kind)
+                    )
+                    center = self._label_anchor_center(
                         self._move_session.item_id,
+                        target_kind,
                         self._move_session.index,
                     )
+                    axis = self._move_session.axis
+                    axis_norm = math.sqrt(sum(c * c for c in axis))
+                    if axis_norm < 1e-7:
+                        return center
+                    direction = tuple(c / axis_norm for c in axis)
                     offset = self._move_session.distance + 8.0
                     return tuple(
-                        center_component + axis_component * offset
-                        for center_component, axis_component in zip(
-                            center,
-                            self._move_session.axis,
-                        )
+                        center_component + dir_component * offset
+                        for center_component, dir_component in zip(center, direction)
                     )
                 except (CommandError, IndexError, ValueError):
                     LOGGER.debug("Dimension label position fallback", exc_info=True)
             return (0.0, 0.0, 0.0)
+
+        def _label_anchor_center(
+            self,
+            item_id: str,
+            target_kind,
+            index: int,
+        ) -> tuple[float, float, float]:
+            if target_kind == SelectionKind.FACE:
+                return self._face_center(item_id, index)
+            shape = picker.subshape(item_id, target_kind, index)
+            return self._shape_center(shape) or (0.0, 0.0, 0.0)
 
         @staticmethod
         def _workplane_point(
