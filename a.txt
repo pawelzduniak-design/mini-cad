@@ -1,106 +1,25 @@
-Musimy naprawić zachowanie funkcji Move Edge w mojej aplikacji CAD Direct Modeling.
-
-Ważne:
-Gdy przesuwam jedną krawędź boxa, NIE chcę, żeby cały box pozostawał prostopadłościanem.
-Chcę lokalną deformację w stylu BRep.
-
-Oczekiwane zachowanie:
-Jeśli wybrana krawędź zostanie przesunięta, powinny przesunąć się tylko dwa wierzchołki należące do tej krawędzi.
-Wszystkie ściany połączone z tymi wierzchołkami/krawędzią powinny zostać przebudowane/zdeformowane.
-Cała reszta powinna zostać dokładnie tam, gdzie była.
-
-Konkretny przykład:
-Mam prostokątny górny box stojący na większym dolnym boxie/bazie.
-Wybieram górną przednią krawędź górnego boxa.
-Następnie przeciągam tę krawędź w dół wzdłuż osi Z.
-
-Oczekiwany rezultat:
-Górny obiekt nie może już być prostokątnym boxem.
-
-Powinien stać się pochylonym / ściętym boxem:
-
-- wybrana górna przednia krawędź przesuwa się w dół,
-- przeciwległa górna tylna krawędź zostaje na miejscu,
-- dół górnego boxa zostaje na miejscu,
-- przednia ściana staje się niższa,
-- górna ściana staje się pochylona,
-- lewa boczna ściana staje się trapezem,
-- prawa boczna ściana staje się trapezem,
-- tylna ściana zostaje bez zmian,
-- dolny box/baza nie może się w ogóle zmienić.
-
-To jest jak zrobienie prostego kształtu „domku z jednospadowym dachem”:
-box, w którym jedna górna krawędź została obniżona, tworząc pochyły dach.
-
-Błędne zachowanie:
-- Nie skaluj całego górnego boxa.
-- Nie przesuwaj całej górnej bryły.
-- Nie przebudowuj górnej bryły na podstawie jej bounding boxa.
-- Nie utrzymuj obiektu jako idealnego prostopadłościanu.
-- Nie zmieniaj dolnego obiektu/bazy.
-- Nie interpretuj tego jako zmianę rozmiaru feature/extrude.
-- Nie przesuwaj niewybranych wierzchołków.
-
-Reguła implementacyjna:
-Move Edge oznacza:
-1. Zidentyfikuj dwa końcowe wierzchołki wybranej krawędzi.
-2. Zastosuj przesunięcie drag delta tylko do tych dwóch wierzchołków.
-3. Przebuduj dotknięte ściany, używając nowych pozycji wierzchołków.
-4. Zachowaj pozycje wszystkich pozostałych wierzchołków.
-5. Zwróć poprawną bryłę.
-
-Dla tej operacji topologia powinna zasadniczo pozostać taka sama:
-- 8 wierzchołków,
-- 12 krawędzi,
-- 6 ścian,
-ale geometria ścian zmienia się, ponieważ jedna górna krawędź jest niżej.
-
-Dodaj automatyczny test regresyjny.
-
-Nazwa testu:
-test_move_top_front_edge_creates_slanted_box_not_resized_box
-
-Konfiguracja testu:
-1. Utwórz bazowy box, na przykład:
-   base = box 200 x 160 x 40
-
-2. Utwórz górny box na nim, na przykład:
-   upper = box 100 x 80 x 60
-   umieszczony na górze bazy
-
-3. Zapisz wszystkie pozycje wierzchołków przed operacją.
-
-4. Wybierz górną przednią krawędź górnego boxa.
-
-5. Zastosuj:
-   move_edge(edge, delta=(0, 0, -30))
-
-Oczekiwane asercje:
-- Dokładnie dwa wierzchołki wybranej krawędzi zmieniły pozycję.
-- Oba wierzchołki wybranej krawędzi mają Z zmniejszone o 30.
-- Ich współrzędne X i Y nie zmieniły się.
-- Przeciwległa górna tylna krawędź górnego boxa nie przesunęła się.
-- Wszystkie dolne wierzchołki górnego boxa nie przesunęły się.
-- Wszystkie wierzchołki dolnego boxa/bazy nie przesunęły się.
-- Długość wybranej krawędzi pozostała taka sama.
-- Górny kształt nadal jest poprawną bryłą.
-- Górny kształt nie jest już prostokątnym prostopadłościanem.
-- Górna ściana jest pochylona.
-- Dwie boczne ściany są trapezami.
-
-Wizualny test akceptacyjny:
-Utwórz scenę testową „mały domek z jednospadowym dachem”:
-- dolny duży box = dom/baza,
-- górny mniejszy box = blok dachu,
-- wybierz górną przednią krawędź górnego boxa,
-- przesuń ją w dół.
-
-Wyrenderowany rezultat musi wyglądać jak prosty domek/szopa z pochylonym dachem.
-Jeśli nadal wygląda jak normalny box, test jest oblany.
-Jeśli przesuwa się cały górny box, test jest oblany.
-Jeśli zmienia się dolna baza, test jest oblany.
-Jeśli dwie boczne ściany nie są trapezami, test jest oblany.
-Jeśli model staje się niepoprawny, test jest oblany.
-
-Nie rób tylko tak, żeby screenshot wyglądał poprawnie.
-Geometria ma być poprawna i zweryfikowana asercjami pozycji wierzchołków.
+5:51:33.636 INFO [cad_app.viewer] Displayed scene with 1 item(s)
+15:51:33.639 INFO [cad_app.main_window] Sketch Extrude tool applied kind=SelectionKind.FACE item_id=1c0e4e7b-9383-4fe1-a5bd-01c2a66bedd1 index=1 distance=45.98 axis=Normal
+15:51:34.844 INFO [cad_app.viewer] Selection mode set to edge
+15:51:34.847 INFO [cad_app.main_window] UI selection mode set to edge
+15:51:35.803 INFO [cad_app.main_window] Selected edge item_id=1c0e4e7b-9383-4fe1-a5bd-01c2a66bedd1 index=4 distance_px=2.32 depth=409.26
+15:51:37.289 INFO [cad_app.main_window] Move tool started kind=edge item_id=1c0e4e7b-9383-4fe1-a5bd-01c2a66bedd1 index=4 axis=View
+Error calling Python override of QWidget::mouseReleaseEvent(): Traceback (most recent call last):
+  File "C:\Users\kwipzdadmin\Desktop\cad\cad_app\main_window.py", line 393, in mouseReleaseEvent
+    self._commit_move_session()
+  File "C:\Users\kwipzdadmin\Desktop\cad\cad_app\main_window.py", line 2529, in _commit_move_session
+    self._apply_move_session(session)
+  File "C:\Users\kwipzdadmin\Desktop\cad\cad_app\main_window.py", line 2667, in _apply_move_session
+    apply_move_edge_controlled(
+  File "C:\Users\kwipzdadmin\Desktop\cad\cad_app\commands.py", line 550, in apply_move_edge_controlled
+    result = move_edge_controlled(scene_object.shape, edge_index, dx, dy, dz)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\kwipzdadmin\Desktop\cad\cad_app\commands.py", line 537, in move_edge_controlled
+    return _move_vertices_by_convex_rebuild(shape, moved_vertex_indexes, (dx, dy, dz))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\kwipzdadmin\Desktop\cad\cad_app\commands.py", line 784, in _move_vertices_by_convex_rebuild
+    shell = TopoDS.Shell_s(sewing.SewedShape())
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+OCP.OCP.Standard.Standard_TypeMismatch: TopoDS::Shell
+15:51:42.927 INFO [cad_app.viewer] Viewer closed
+15:51:42.928 INFO [cad_app.app] Application exited with code 0

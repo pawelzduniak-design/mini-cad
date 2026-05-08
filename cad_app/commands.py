@@ -518,21 +518,11 @@ def move_edge_controlled(
     dy: float,
     dz: float,
 ) -> TopoDS_Shape:
-    """Move both vertices of an edge on a simple convex planar solid.
-
-    Convex hull vertex rebuild is used for single-axis moves.
-    Multi-axis vectors (e.g. View-drag) are routed through a
-    safer face-extrude path to avoid InvalidShapeError.
-    """
+    """Move both vertices of an edge on a simple convex planar solid."""
     _validate_move_vector(dx, dy, dz)
     validate_shape(shape)
     edge = _edge_by_index(shape, edge_index)
     _assert_sharp_planar_edge(shape, edge)
-
-    axis_count = sum(1 for c in (dx, dy, dz) if abs(c) > 1e-9)
-    if axis_count > 1:
-        return _move_edge_via_best_face(shape, edge_index, edge, dx, dy, dz)
-
     moved_vertex_indexes = _edge_vertex_indexes(shape, edge)
     return _move_vertices_by_convex_rebuild(shape, moved_vertex_indexes, (dx, dy, dz))
 
@@ -706,139 +696,18 @@ def _move_vertices_by_convex_rebuild(
     vector: tuple[float, float, float],
 ) -> TopoDS_Shape:
     _assert_all_faces_planar(shape)
-    original_points = _shape_vertex_points(shape)
-    if len(original_points) < 4:
+    points = _shape_vertex_points(shape)
+    if len(points) < 4:
         raise UnsupportedTopologyError("Convex rebuild requires at least four points.")
 
     dx, dy, dz = vector
     moved_points = [
-        (x + dx, y + dy, z + dz) if i in moved_vertex_indexes else (x, y, z)
-        for i, (x, y, z) in enumerate(original_points, start=1)
+        (x + dx, y + dy, z + dz) if index in moved_vertex_indexes else (x, y, z)
+        for index, (x, y, z) in enumerate(points, start=1)
     ]
-
-    vertex_map = Picker.indexed_map(shape, SelectionKind.VERTEX)
-    face_map = Picker.indexed_map(shape, SelectionKind.FACE)
-
-    from OCP.BRepBuilderAPI import (
-        BRepBuilderAPI_MakeFace,
-        BRepBuilderAPI_MakePolygon,
-        BRepBuilderAPI_MakeSolid,
-        BRepBuilderAPI_Sewing,
-    )
-    from OCP.gp import gp_Pnt
-    from OCP.TopAbs import TopAbs_REVERSED
-    from OCP.TopoDS import TopoDS
-
-    sewing = BRepBuilderAPI_Sewing(1e-5)
-    for face_idx in range(1, face_map.Extent() + 1):
-        face = TopoDS.Face_s(face_map.FindKey(face_idx))
-        ordered_vi = _face_ordered_vertex_indices(face, vertex_map)
-        if len(ordered_vi) < 3:
-            raise UnsupportedTopologyError(
-                f"Face {face_idx} has fewer than 3 vertices."
-            )
-
-        original_reversed = face.Orientation() == TopAbs_REVERSED
-
-        if len(ordered_vi) == 3:
-            polygon = BRepBuilderAPI_MakePolygon()
-            for vi in ordered_vi:
-                pt = moved_points[vi - 1]
-                polygon.Add(gp_Pnt(*pt))
-            polygon.Close()
-            fb = BRepBuilderAPI_MakeFace(polygon.Wire(), True)
-            if not fb.IsDone():
-                raise UnsupportedTopologyError(f"Failed to rebuild face {face_idx}.")
-            new_face = fb.Face()
-            if original_reversed:
-                new_face.Orientation(TopAbs_REVERSED)
-            sewing.Add(new_face)
-            continue
-
-        polygon = BRepBuilderAPI_MakePolygon()
-        for vi in ordered_vi:
-            pt = moved_points[vi - 1]
-            polygon.Add(gp_Pnt(*pt))
-        polygon.Close()
-        fb = BRepBuilderAPI_MakeFace(polygon.Wire(), True)
-        if fb.IsDone():
-            new_face = fb.Face()
-            if original_reversed:
-                new_face.Orientation(TopAbs_REVERSED)
-            sewing.Add(new_face)
-        else:
-            for tri_idx in range(len(ordered_vi) - 2):
-                tri = [ordered_vi[0], ordered_vi[tri_idx + 1], ordered_vi[tri_idx + 2]]
-                tri_poly = BRepBuilderAPI_MakePolygon()
-                for vi in tri:
-                    tri_poly.Add(gp_Pnt(*moved_points[vi - 1]))
-                tri_poly.Close()
-                tri_fb = BRepBuilderAPI_MakeFace(tri_poly.Wire(), True)
-                if tri_fb.IsDone():
-                    tri_face = tri_fb.Face()
-                    if original_reversed:
-                        tri_face.Orientation(TopAbs_REVERSED)
-                    sewing.Add(tri_face)
-
-    sewing.Perform()
-    shell = TopoDS.Shell_s(sewing.SewedShape())
-    solid_builder = BRepBuilderAPI_MakeSolid(shell)
-    solid = solid_builder.Solid()
-    validate_shape(solid)
-    return cleanup_shape(solid)
-
-
-def _face_ordered_vertex_indices(face, vertex_map) -> list[int]:
-    from OCP.BRep import BRep_Tool
-    from OCP.BRepAdaptor import BRepAdaptor_Curve
-    from OCP.TopAbs import TopAbs_EDGE, TopAbs_WIRE
-    from OCP.TopExp import TopExp_Explorer
-    from OCP.TopoDS import TopoDS
-
-    outer_wire = None
-    wire_exp = TopExp_Explorer(face, TopAbs_WIRE)
-    if wire_exp.More():
-        outer_wire = wire_exp.Current()
-
-    if outer_wire is None:
-        raise UnsupportedTopologyError("Cannot extract outer wire from face.")
-
-    ordered_pts: list[tuple[float, float, float]] = []
-    seen = set()
-    edge_exp = TopExp_Explorer(outer_wire, TopAbs_EDGE)
-    while edge_exp.More():
-        edge = TopoDS.Edge_s(edge_exp.Current())
-        curve = BRepAdaptor_Curve(edge)
-        fp = curve.Value(curve.FirstParameter())
-        lp = curve.Value(curve.LastParameter())
-        for pt in ((fp.X(), fp.Y(), fp.Z()), (lp.X(), lp.Y(), lp.Z())):
-            key = (round(pt[0], 6), round(pt[1], 6), round(pt[2], 6))
-            if key not in seen:
-                ordered_pts.append(pt)
-                seen.add(key)
-        edge_exp.Next()
-
-    if not ordered_pts:
-        raise UnsupportedTopologyError("Face has no vertices in order.")
-
-    result = []
-    for pt in ordered_pts:
-        match = 0
-        for vi in range(1, vertex_map.Extent() + 1):
-            v = TopoDS.Vertex_s(vertex_map.FindKey(vi))
-            p = BRep_Tool.Pnt_s(v)
-            dist = (pt[0] - p.X()) ** 2 + (pt[1] - p.Y()) ** 2 + (pt[2] - p.Z()) ** 2
-            if dist < 1e-10:
-                match = vi
-                break
-        if match == 0:
-            raise UnsupportedTopologyError(
-                f"Vertex at ({pt[0]:.1f},{pt[1]:.1f},{pt[2]:.1f}) "
-                f"not found in shape vertex map."
-            )
-        result.append(match)
-
-    return result
+    rebuilt = _build_convex_polyhedron(moved_points)
+    validate_shape(rebuilt)
+    return cleanup_shape(rebuilt)
 
 
 def _assert_all_faces_planar(shape: TopoDS_Shape) -> None:
@@ -1343,41 +1212,3 @@ def _workplane_from_face(face: TopoDS_Face):
     from cad_app.workplane import Workplane
 
     return Workplane.from_face(face)
-
-
-def _move_edge_via_best_face(
-    shape: TopoDS_Shape,
-    edge_index: int,
-    edge: TopoDS_Edge,
-    dx: float,
-    dy: float,
-    dz: float,
-) -> TopoDS_Shape:
-    faces = _edge_adjacent_faces(shape, edge)
-    if len(faces) != 2:
-        raise UnsupportedTopologyError(
-            "Edge operation requires exactly two adjacent faces."
-        )
-
-    move_dir = (dx, dy, dz)
-    face_map = Picker.indexed_map(shape, SelectionKind.FACE)
-    best_face_index = 0
-    best_dot = -1.0
-    best_proj = 0.0
-
-    for face in faces:
-        normal = _planar_face_normal(face)
-        n = (normal.X(), normal.Y(), normal.Z())
-        proj = move_dir[0] * n[0] + move_dir[1] * n[1] + move_dir[2] * n[2]
-        if abs(proj) > best_dot:
-            best_dot = abs(proj)
-            idx = face_map.FindIndex(face)
-            if idx > 0:
-                best_face_index = idx
-                best_proj = proj
-
-    if best_face_index == 0 or abs(best_proj) < 1e-9:
-        moved_vertex_indexes = _edge_vertex_indexes(shape, edge_index)
-        return _move_vertices_by_convex_rebuild(shape, moved_vertex_indexes, move_dir)
-
-    return extrude_face(shape, best_face_index, best_proj)
