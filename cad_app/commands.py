@@ -1233,31 +1233,53 @@ def _move_edge_via_best_face(
     dy: float,
     dz: float,
 ) -> TopoDS_Shape:
-    """Fallback for complex bodies: push the best-aligned adjacent face."""
+    """Apply face extrude to both adjacent faces for edge move on
+    complex bodies. Projects the move vector onto each face normal
+    and applies sequential boolean push/pull."""
     faces = _edge_adjacent_faces(shape, edge)
     if len(faces) != 2:
         raise UnsupportedTopologyError(
             "Edge operation requires exactly two adjacent faces."
         )
 
-    move_dir = (dx, dy, dz)
-    face_map = Picker.indexed_map(shape, SelectionKind.FACE)
-    best_face_index = 0
-    best_dot = -1.0
-    best_proj = 0.0
-
+    projections: list[tuple[tuple[float, float, float], float]] = []
     for face in faces:
         normal = _planar_face_normal(face)
         n = (normal.X(), normal.Y(), normal.Z())
-        proj = move_dir[0] * n[0] + move_dir[1] * n[1] + move_dir[2] * n[2]
-        if abs(proj) > best_dot:
-            best_dot = abs(proj)
-            idx = face_map.FindIndex(face)
-            if idx > 0:
-                best_face_index = idx
-                best_proj = proj
+        proj = dx * n[0] + dy * n[1] + dz * n[2]
+        if abs(proj) > 1e-9:
+            projections.append((n, proj))
 
-    if best_face_index == 0 or abs(best_proj) < 1e-9:
-        raise UnsupportedTopologyError("No suitable adjacent face found for edge move.")
+    if not projections:
+        raise UnsupportedTopologyError(
+            "Move vector has no projection on adjacent faces."
+        )
 
-    return extrude_face(shape, best_face_index, best_proj)
+    from OCP.TopoDS import TopoDS
+
+    result = shape
+    for _normal, proj_distance in projections:
+        face_map = Picker.indexed_map(result, SelectionKind.FACE)
+        best_face_index = 0
+        for i in range(1, face_map.Extent() + 1):
+            face = TopoDS.Face_s(face_map.FindKey(i))
+            try:
+                fnormal = _planar_face_normal(face)
+                fn = (fnormal.X(), fnormal.Y(), fnormal.Z())
+                if _vectors_parallel(fn, _normal):
+                    best_face_index = i
+                    break
+            except UnsupportedTopologyError:
+                continue
+        if best_face_index == 0:
+            continue
+        result = extrude_face(result, best_face_index, proj_distance)
+
+    return result
+
+
+def _vectors_parallel(
+    a: tuple[float, float, float],
+    b: tuple[float, float, float],
+) -> bool:
+    return abs(a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) > 0.9999
