@@ -27,7 +27,7 @@ from cad_app.measurement import (
 from cad_app.thread_specs import (
     THREAD_MODES,
     THREAD_TYPES,
-    closest_thread_preset,
+    matching_thread_preset_for_edge_diameter,
     thread_parameters_from_preset,
     thread_preset_by_name,
     thread_preset_names,
@@ -207,7 +207,8 @@ class ViewerWidgetCommandsMixin:
             return
 
         preset_names = thread_preset_names()
-        default_preset = closest_thread_preset(radius * 2.0).name
+        matching_preset = matching_thread_preset_for_edge_diameter(radius * 2.0)
+        default_preset = "Custom" if matching_preset is None else matching_preset.name
         preset_index = preset_names.index(default_preset)
         preset_name, ok = QInputDialog.getItem(
             self,

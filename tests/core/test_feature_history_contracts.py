@@ -149,6 +149,16 @@ def test_thread_presets_expose_manufacturing_dimensions() -> None:
     )
 
 
+def test_thread_default_preset_uses_custom_for_nonstandard_edge_diameter() -> None:
+    from cad_app.thread_specs import matching_thread_preset_for_edge_diameter
+
+    matched = matching_thread_preset_for_edge_diameter(15.33)
+
+    assert matched is not None
+    assert matched.name == "ISO M16x2.0"
+    assert matching_thread_preset_for_edge_diameter(54.66) is None
+
+
 def test_cosmetic_thread_keeps_geometry_and_records_feature_history() -> None:
     require_ocp()
 

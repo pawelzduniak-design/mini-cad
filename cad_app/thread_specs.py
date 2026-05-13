@@ -95,11 +95,27 @@ def thread_preset_by_name(name: str) -> ThreadPreset | None:
     raise ValueError(f"Unknown thread preset: {name}")
 
 
-def closest_thread_preset(major_diameter: float) -> ThreadPreset:
-    return min(
-        THREAD_PRESETS,
-        key=lambda preset: abs(preset.major_diameter - major_diameter),
-    )
+def matching_thread_preset_for_edge_diameter(
+    edge_diameter: float,
+    *,
+    thread_type: str = "auto",
+) -> ThreadPreset | None:
+    """Return a preset only when it is compatible with the selected edge."""
+    if edge_diameter <= 0:
+        raise ValueError("Thread edge diameter must be positive.")
+    if thread_type not in THREAD_TYPES:
+        raise ValueError(f"Unsupported thread type: {thread_type}")
+
+    matches: list[tuple[float, ThreadPreset]] = []
+    for preset in THREAD_PRESETS:
+        candidates = _preset_candidate_diameters(preset, thread_type)
+        tolerance = _thread_profile_tolerance(preset.pitch, candidates)
+        distance = min(abs(edge_diameter - candidate) for candidate in candidates)
+        if distance <= tolerance:
+            matches.append((distance, preset))
+    if not matches:
+        return None
+    return min(matches, key=lambda match: match[0])[1]
 
 
 def thread_parameters_from_preset(preset: ThreadPreset) -> dict[str, float | str]:
@@ -179,11 +195,30 @@ def validate_thread_edge_profile(
             candidates.append(float(major_diameter))
     if not candidates:
         return
-    nominal = max(candidates)
-    tolerance = max(pitch, nominal * 0.15)
+    tolerance = _thread_profile_tolerance(pitch, candidates)
     if all(abs(edge_diameter - candidate) > tolerance for candidate in candidates):
         expected = " or ".join(f"{candidate:.2f} mm" for candidate in candidates)
         raise ValueError(
             "Selected circular edge diameter "
             f"{edge_diameter:.2f} mm does not match thread profile {expected}."
         )
+
+
+def _preset_candidate_diameters(
+    preset: ThreadPreset,
+    thread_type: str,
+) -> tuple[float, ...]:
+    candidates: list[float] = []
+    if thread_type in {"auto", "external"}:
+        candidates.append(preset.major_diameter)
+    if thread_type in {"auto", "internal"}:
+        candidates.append(preset.minor_diameter)
+    return tuple(candidates)
+
+
+def _thread_profile_tolerance(
+    pitch: float,
+    candidates: list[float] | tuple[float, ...],
+) -> float:
+    nominal = max(candidates)
+    return max(pitch, nominal * 0.15)
