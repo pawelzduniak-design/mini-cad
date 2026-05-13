@@ -23,6 +23,12 @@ dev = [
   "Pillow",
 ]
 
+[tool.setuptools.packages.find]
+include = ["cad_app*"]
+
+[tool.setuptools.package-data]
+cad_app = ["assets/icons/*.png"]
+
 [tool.pytest.ini_options]
 minversion = "7.0"
 addopts = "-q"

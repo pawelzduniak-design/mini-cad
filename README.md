@@ -7,20 +7,44 @@ features, parametric rebuild contracts, and visual workflow checks.
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.10+; Python 3.11 is recommended for OCP/cadquery-ocp wheels.
 - Windows is the primary tested platform for GUI and tutorial capture workflows.
-- Runtime dependencies are declared in `pyproject.toml`.
+- Runtime dependencies are declared in `pyproject.toml` and mirrored in
+  `requirements.txt`.
+- Development/test dependencies are in `requirements-dev.txt`.
 
 ## Setup
 
+Create a local virtual environment:
+
 ```powershell
-python -m venv .venv
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+```
+
+Install the app for development:
+
+```powershell
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+```
+
+Or install from requirements files:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 ```
 
 ## Run
 
 ```powershell
+.\run.ps1 app
+```
+
+`run.ps1` uses `.venv\Scripts\python.exe` automatically when it exists. To use a
+different interpreter:
+
+```powershell
+$env:CAD_APP_PYTHON = "C:\path\to\python.exe"
 .\run.ps1 app
 ```
 
@@ -32,8 +56,6 @@ Useful tasks:
 .\run.ps1 visual
 .\run.ps1 tutorials
 ```
-
-`CAD_APP_PYTHON` can point `run.ps1` at a specific Python executable.
 
 ## Documentation
 

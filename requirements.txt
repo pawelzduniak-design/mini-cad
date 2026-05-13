@@ -1,0 +1,4 @@
+PySide6
+cadquery-ocp
+build123d
+shapely
