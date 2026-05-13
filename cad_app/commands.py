@@ -5,59 +5,100 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
+from cad_app.command_common import (
+    CommandError,
+    InvalidShapeError,
+    OperationFailedError,
+    UnsupportedTopologyError,
+    cleanup_shape,
+    validate_shape,
+)
+from cad_app.command_geometry import (
+    _assert_all_faces_planar,
+    _assert_round_surface_count,
+    _assert_sharp_planar_edge,
+    _assert_supported_round_contour,
+    _count_cylindrical_faces,
+    _edge_by_index,
+    _edge_vertex_indexes,
+    _face_by_index,
+    _face_vertex_indexes,
+    _is_occt_exception,
+    _move_edge_via_best_face,
+    _move_vertices_by_convex_rebuild,
+    _move_vertices_via_face_rebuild,
+    _planar_face_normal,
+    _run_boolean,
+    _try_rebased_fillet,
+    _updated_fillet_history,
+    _validate_move_vector,
+    _vertex_by_index,
+    _workplane_from_face,
+    edge_supports_direct_round,
+    top_planar_face_index,
+)
+from cad_app.feature_history import (
+    append_feature_step,
+    capture_extrude_face_step,
+    capture_thread_step,
+)
 from cad_app.picker import Picker
 from cad_app.profiles import CircleProfile
+from cad_app.thread_specs import (
+    normalized_thread_parameters,
+    validate_thread_edge_profile,
+)
 from cad_app.types import SelectionKind
 
-_FILLET_HISTORY_KEY = "direct_fillet_history"
+__all__ = [
+    "CommandError",
+    "InvalidShapeError",
+    "OperationFailedError",
+    "UnsupportedTopologyError",
+    "add_circle_feature",
+    "apply_boolean_bodies",
+    "apply_chamfer_edge",
+    "apply_circle_feature",
+    "apply_extrude_face",
+    "apply_fillet_edge",
+    "apply_move_edge_controlled",
+    "apply_move_face_controlled",
+    "apply_move_face_normal",
+    "apply_move_object",
+    "apply_thread_to_edge",
+    "apply_move_vertex_controlled",
+    "apply_remove_face",
+    "apply_rotate_object",
+    "boolean_bodies",
+    "chamfer_edge",
+    "cleanup_shape",
+    "edge_supports_direct_round",
+    "extrude_face",
+    "face_normal_vector",
+    "fillet_edge",
+    "fillet_edges",
+    "circular_edge_parameters",
+    "move_edge_controlled",
+    "move_face_controlled",
+    "move_face_normal",
+    "move_shape",
+    "move_vertex_controlled",
+    "rotate_shape",
+    "rotated_shape",
+    "supports_move_edge_controlled",
+    "supports_move_face_controlled",
+    "thread_default_length",
+    "thread_edge",
+    "supports_move_vertex_controlled",
+    "top_planar_face_index",
+    "translated_shape",
+    "validate_shape",
+]
 
 if TYPE_CHECKING:
-    from OCP.TopoDS import TopoDS_Edge, TopoDS_Face, TopoDS_Shape
+    from OCP.TopoDS import TopoDS_Shape
 
     from cad_app.scene import Scene
-
-
-class CommandError(RuntimeError):
-    """Base error for direct modeling command failures."""
-
-
-class InvalidShapeError(CommandError):
-    """Raised when input or result shape is topologically invalid."""
-
-
-class UnsupportedTopologyError(CommandError):
-    """Raised when a command receives unsupported topology."""
-
-
-class OperationFailedError(CommandError):
-    """Raised when OCCT refuses to build the requested operation."""
-
-
-def validate_shape(shape: TopoDS_Shape) -> None:
-    """Validate a TopoDS shape using OCCT's BRepCheck analyzer."""
-    from OCP.BRepCheck import BRepCheck_Analyzer
-
-    if shape.IsNull():
-        raise InvalidShapeError("Shape is null.")
-    if not BRepCheck_Analyzer(shape).IsValid():
-        raise InvalidShapeError("Shape is not topologically valid.")
-
-
-def cleanup_shape(shape: TopoDS_Shape) -> TopoDS_Shape:
-    """Merge same-domain faces/edges when OCCT can do it safely."""
-    validate_shape(shape)
-
-    from OCP.ShapeUpgrade import ShapeUpgrade_UnifySameDomain
-
-    unifier = ShapeUpgrade_UnifySameDomain(shape, True, True, False)
-    unifier.SetSafeInputMode(True)
-    unifier.Build()
-    cleaned = unifier.Shape()
-    try:
-        validate_shape(cleaned)
-    except InvalidShapeError:
-        return shape
-    return cleaned
 
 
 def extrude_face(
@@ -96,8 +137,13 @@ def apply_extrude_face(
 ) -> TopoDS_Shape:
     """Apply extrude to a scene object after successful validation."""
     scene_object = scene.get(item_id)
+    step = capture_extrude_face_step(scene_object.shape, face_index, distance)
     result = extrude_face(scene_object.shape, face_index, distance)
-    scene.replace_shape(item_id, result)
+    scene.replace_shape(
+        item_id,
+        result,
+        meta=append_feature_step(scene_object.meta, scene_object.shape, step),
+    )
     return result
 
 
@@ -155,6 +201,386 @@ def apply_circle_feature(
     result = add_circle_feature(scene_object.shape, face_index, radius, depth, cut)
     scene.replace_shape(item_id, result)
     return result
+
+
+def circular_edge_parameters(
+    shape: TopoDS_Shape,
+    edge_index: int,
+) -> tuple[tuple[float, float, float], tuple[float, float, float], float]:
+    """Return center, normal axis, and radius for a circular edge."""
+    validate_shape(shape)
+    edge = _edge_by_index(shape, edge_index)
+
+    from OCP.BRepAdaptor import BRepAdaptor_Curve
+    from OCP.GeomAbs import GeomAbs_Circle
+
+    curve = BRepAdaptor_Curve(edge)
+    if curve.GetType() != GeomAbs_Circle:
+        raise UnsupportedTopologyError("Thread requires a circular edge.")
+    circle = curve.Circle()
+    center = circle.Location()
+    direction = circle.Axis().Direction()
+    radius = float(circle.Radius())
+    if radius <= 1e-7:
+        raise UnsupportedTopologyError("Circular edge radius is too small.")
+    return (
+        (center.X(), center.Y(), center.Z()),
+        _unit_vector((direction.X(), direction.Y(), direction.Z())),
+        radius,
+    )
+
+
+def thread_default_length(
+    shape: TopoDS_Shape,
+    axis: tuple[float, float, float],
+) -> float:
+    """Return a practical default thread length from shape bounds."""
+    min_projection, max_projection = _shape_projection_bounds(shape, axis)
+    span = max_projection - min_projection
+    if span <= 1e-7:
+        return 20.0
+    return span
+
+
+def thread_edge(
+    shape: TopoDS_Shape,
+    edge_index: int,
+    pitch: float,
+    length: float,
+    depth: float,
+    *,
+    mode: str = "modeled",
+    thread_type: str = "auto",
+    standard: str = "custom",
+    size: str = "custom",
+    major_diameter: float | None = None,
+    minor_diameter: float | None = None,
+) -> TopoDS_Shape:
+    """Add an approximate modeled thread from a selected circular edge."""
+    params = normalized_thread_parameters(
+        pitch=pitch,
+        length=length,
+        depth=depth,
+        mode=mode,
+        thread_type=thread_type,
+        standard=standard,
+        size=size,
+        major_diameter=major_diameter,
+        minor_diameter=minor_diameter,
+    )
+    validate_shape(shape)
+
+    center, axis, radius = circular_edge_parameters(shape, edge_index)
+    validate_thread_edge_profile(params, radius * 2.0)
+    if params["mode"] == "cosmetic":
+        return shape
+    axis = _axis_toward_shape_span(shape, center, axis)
+    internal = (
+        _thread_is_internal(shape, center, axis, radius, length)
+        if params["thread_type"] == "auto"
+        else params["thread_type"] == "internal"
+    )
+    thread_shape = _thread_solid(
+        center,
+        axis,
+        radius,
+        pitch,
+        length,
+        depth,
+        internal=internal,
+    )
+
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut, BRepAlgoAPI_Fuse
+
+    operation_cls = BRepAlgoAPI_Cut if internal else BRepAlgoAPI_Fuse
+    return _run_boolean(shape, thread_shape, operation_cls, "Thread failed.")
+
+
+def apply_thread_to_edge(
+    scene: Scene,
+    item_id: str,
+    edge_index: int,
+    pitch: float,
+    length: float,
+    depth: float,
+    *,
+    mode: str = "modeled",
+    thread_type: str = "auto",
+    standard: str = "custom",
+    size: str = "custom",
+    major_diameter: float | None = None,
+    minor_diameter: float | None = None,
+) -> TopoDS_Shape:
+    """Apply a thread feature to a selected circular edge."""
+    scene_object = scene.get(item_id)
+    params = normalized_thread_parameters(
+        pitch=pitch,
+        length=length,
+        depth=depth,
+        mode=mode,
+        thread_type=thread_type,
+        standard=standard,
+        size=size,
+        major_diameter=major_diameter,
+        minor_diameter=minor_diameter,
+    )
+    step = capture_thread_step(scene_object.shape, edge_index, params)
+    result = thread_edge(
+        scene_object.shape,
+        edge_index,
+        pitch,
+        length,
+        depth,
+        mode=mode,
+        thread_type=thread_type,
+        standard=standard,
+        size=size,
+        major_diameter=major_diameter,
+        minor_diameter=minor_diameter,
+    )
+    meta = {
+        **scene_object.meta,
+        "last_operation": "thread",
+        "thread_pitch": pitch,
+        "thread_length": length,
+        "thread_depth": depth,
+        "thread_mode": mode,
+        "thread_type": thread_type,
+        "thread_standard": standard,
+        "thread_size": size,
+    }
+    scene.replace_shape(
+        item_id,
+        result,
+        meta=append_feature_step(meta, scene_object.shape, step),
+    )
+    return result
+
+
+def _thread_solid(
+    center: tuple[float, float, float],
+    axis: tuple[float, float, float],
+    radius: float,
+    pitch: float,
+    length: float,
+    depth: float,
+    *,
+    internal: bool,
+) -> TopoDS_Shape:
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_MakePolygon
+    from OCP.BRepOffsetAPI import BRepOffsetAPI_ThruSections
+
+    overlap = max(min(depth * 0.2, radius * 0.05), 0.01)
+    if internal:
+        root_radius = radius + overlap
+        crest_radius = max(radius - depth, 0.001)
+    else:
+        root_radius = max(radius - overlap, 0.001)
+        crest_radius = radius + depth
+
+    turns = length / pitch
+    steps = max(18, min(360, int(math.ceil(turns * 24.0))))
+    half_pitch = min(pitch * 0.25, length * 0.25)
+    basis_u, basis_v = _perpendicular_basis(axis)
+    loft = BRepOffsetAPI_ThruSections(True, False, 1e-6)
+    for index in range(steps + 1):
+        fraction = index / steps
+        angle = 2.0 * math.pi * turns * fraction
+        axial_distance = length * fraction
+        radial = _radial_direction(basis_u, basis_v, angle)
+        polygon = BRepBuilderAPI_MakePolygon()
+        polygon.Add(
+            _axis_radius_point(
+                center,
+                axis,
+                radial,
+                axial_distance - half_pitch,
+                root_radius,
+            )
+        )
+        polygon.Add(
+            _axis_radius_point(
+                center,
+                axis,
+                radial,
+                axial_distance,
+                crest_radius,
+            )
+        )
+        polygon.Add(
+            _axis_radius_point(
+                center,
+                axis,
+                radial,
+                axial_distance + half_pitch,
+                root_radius,
+            )
+        )
+        polygon.Close()
+        if not polygon.IsDone():
+            raise OperationFailedError("Thread section could not be built.")
+        loft.AddWire(polygon.Wire())
+
+    loft.CheckCompatibility(False)
+    loft.Build()
+    if not loft.IsDone():
+        raise OperationFailedError("Thread sweep failed.")
+    result = loft.Shape()
+    validate_shape(result)
+    return cleanup_shape(result)
+
+
+def _thread_is_internal(
+    shape: TopoDS_Shape,
+    center: tuple[float, float, float],
+    axis: tuple[float, float, float],
+    radius: float,
+    length: float,
+) -> bool:
+    probe_offset = min(length * 0.5, thread_default_length(shape, axis) * 0.5)
+    radial, _basis_v = _perpendicular_basis(axis)
+    epsilon = max(radius * 0.03, 0.05)
+    inner_radius = max(radius - epsilon, 0.001)
+    outer_radius = radius + epsilon
+    inner_state = _solid_contains_point(
+        shape,
+        _tuple_axis_radius_point(center, axis, radial, probe_offset, inner_radius),
+    )
+    outer_state = _solid_contains_point(
+        shape,
+        _tuple_axis_radius_point(center, axis, radial, probe_offset, outer_radius),
+    )
+    return bool(outer_state and not inner_state)
+
+
+def _solid_contains_point(
+    shape: TopoDS_Shape,
+    point: tuple[float, float, float],
+) -> bool:
+    from OCP.BRepClass3d import BRepClass3d_SolidClassifier
+    from OCP.gp import gp_Pnt
+    from OCP.TopAbs import TopAbs_IN, TopAbs_ON
+
+    classifier = BRepClass3d_SolidClassifier(shape, gp_Pnt(*point), 1e-6)
+    return classifier.State() in {TopAbs_IN, TopAbs_ON}
+
+
+def _axis_toward_shape_span(
+    shape: TopoDS_Shape,
+    center: tuple[float, float, float],
+    axis: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    min_projection, max_projection = _shape_projection_bounds(shape, axis)
+    center_projection = _dot3(center, axis)
+    if abs(max_projection - center_projection) < abs(
+        center_projection - min_projection
+    ):
+        return tuple(-component for component in axis)
+    return axis
+
+
+def _shape_projection_bounds(
+    shape: TopoDS_Shape,
+    axis: tuple[float, float, float],
+) -> tuple[float, float]:
+    from OCP.Bnd import Bnd_Box
+    from OCP.BRepBndLib import BRepBndLib
+
+    bounds = Bnd_Box()
+    BRepBndLib.Add_s(shape, bounds)
+    if bounds.IsVoid():
+        raise ValueError("Shape bounds are empty.")
+    x_min, y_min, z_min, x_max, y_max, z_max = bounds.Get()
+    projections = [
+        _dot3((x, y, z), axis)
+        for x in (x_min, x_max)
+        for y in (y_min, y_max)
+        for z in (z_min, z_max)
+    ]
+    return min(projections), max(projections)
+
+
+def _perpendicular_basis(
+    axis: tuple[float, float, float],
+) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    reference = (0.0, 0.0, 1.0)
+    if abs(_dot3(axis, reference)) > 0.9:
+        reference = (1.0, 0.0, 0.0)
+    basis_u = _unit_vector(_cross3(axis, reference))
+    basis_v = _unit_vector(_cross3(axis, basis_u))
+    return basis_u, basis_v
+
+
+def _axis_radius_point(
+    center: tuple[float, float, float],
+    axis: tuple[float, float, float],
+    radial: tuple[float, float, float],
+    axial_distance: float,
+    radius: float,
+):
+    from OCP.gp import gp_Pnt
+
+    return gp_Pnt(
+        *_tuple_axis_radius_point(center, axis, radial, axial_distance, radius)
+    )
+
+
+def _tuple_axis_radius_point(
+    center: tuple[float, float, float],
+    axis: tuple[float, float, float],
+    radial: tuple[float, float, float],
+    axial_distance: float,
+    radius: float,
+) -> tuple[float, float, float]:
+    return tuple(
+        center_component + axis_component * axial_distance + radial_component * radius
+        for center_component, axis_component, radial_component in zip(
+            center,
+            axis,
+            radial,
+        )
+    )
+
+
+def _radial_direction(
+    basis_u: tuple[float, float, float],
+    basis_v: tuple[float, float, float],
+    angle: float,
+) -> tuple[float, float, float]:
+    cosine = math.cos(angle)
+    sine = math.sin(angle)
+    return tuple(
+        basis_u_component * cosine + basis_v_component * sine
+        for basis_u_component, basis_v_component in zip(basis_u, basis_v)
+    )
+
+
+def _unit_vector(vector: tuple[float, float, float]) -> tuple[float, float, float]:
+    length = math.sqrt(sum(component * component for component in vector))
+    if length <= 1e-7:
+        raise ValueError("Vector must be non-zero.")
+    return tuple(component / length for component in vector)
+
+
+def _cross3(
+    first: tuple[float, float, float],
+    second: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    return (
+        first[1] * second[2] - first[2] * second[1],
+        first[2] * second[0] - first[0] * second[2],
+        first[0] * second[1] - first[1] * second[0],
+    )
+
+
+def _dot3(
+    first: tuple[float, float, float],
+    second: tuple[float, float, float],
+) -> float:
+    return sum(
+        first_component * second_component
+        for first_component, second_component in zip(first, second)
+    )
 
 
 def boolean_bodies(
@@ -481,7 +907,14 @@ def move_face_controlled(
     face = _face_by_index(shape, face_index)
     _assert_all_faces_planar(shape)
     moved_vertex_indexes = _face_vertex_indexes(shape, face)
-    return _move_vertices_by_convex_rebuild(shape, moved_vertex_indexes, (dx, dy, dz))
+    return _move_vertices_via_face_rebuild(
+        shape,
+        moved_vertex_indexes,
+        dx,
+        dy,
+        dz,
+        allow_nonplanar_faces=False,
+    )
 
 
 def apply_move_face_controlled(
@@ -496,6 +929,51 @@ def apply_move_face_controlled(
     scene_object = scene.get(item_id)
     result = move_face_controlled(scene_object.shape, face_index, dx, dy, dz)
     scene.replace_shape(item_id, result)
+    return result
+
+
+def remove_face(shape: TopoDS_Shape, face_index: int) -> TopoDS_Shape:
+    """Remove one selected face and leave the remaining body as an open shell."""
+    validate_shape(shape)
+    face_map = Picker.indexed_map(shape, SelectionKind.FACE)
+    if face_index < 1 or face_index > face_map.Extent():
+        raise IndexError(f"Face index out of range: {face_index}")
+    if face_map.Extent() <= 1:
+        raise UnsupportedTopologyError("Remove Face requires at least two faces.")
+
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_Sewing
+
+    sewing = BRepBuilderAPI_Sewing(1e-7)
+    for index in range(1, face_map.Extent() + 1):
+        if index == face_index:
+            continue
+        sewing.Add(face_map.FindKey(index))
+    sewing.Perform()
+    result = sewing.SewedShape()
+    try:
+        validate_shape(result)
+    except InvalidShapeError as exc:
+        raise UnsupportedTopologyError(
+            "Remove Face produced invalid open-shell geometry."
+        ) from exc
+    return result
+
+
+def apply_remove_face(
+    scene: Scene,
+    item_id: str,
+    face_index: int,
+) -> TopoDS_Shape:
+    """Remove one face from a scene object without deleting the object."""
+    scene_object = scene.get(item_id)
+    result = remove_face(scene_object.shape, face_index)
+    meta = {
+        **scene_object.meta,
+        "open_shell": True,
+        "last_operation": "remove_face",
+    }
+    scene.replace_shape(item_id, result, meta=meta)
+    scene.set_selection(None)
     return result
 
 
@@ -518,24 +996,35 @@ def move_edge_controlled(
     dy: float,
     dz: float,
 ) -> TopoDS_Shape:
-    """Move both vertices of an edge on a simple convex planar solid.
+    """Move both vertices of an edge on a planar-faced solid.
 
-    For shapes with up to 8 vertices (simple boxes) convex hull
-    vertex rebuild preserves exact topology. For complex/fused
-    bodies (>8 vertices) we fall back to face extrude which
-    uses boolean operations and works on any topology.
+    Always attempts convex hull vertex rebuild first. If the
+    result preserves the original vertex count the shape is
+    convex and the result is trusted. Otherwise falls back
+    to face-by-face rebuild for non-convex bodies.
     """
     _validate_move_vector(dx, dy, dz)
     validate_shape(shape)
     edge = _edge_by_index(shape, edge_index)
     _assert_sharp_planar_edge(shape, edge)
 
-    vertex_count = Picker.indexed_map(shape, SelectionKind.VERTEX).Extent()
-    if vertex_count > 8:
-        return _move_edge_via_best_face(shape, edge_index, edge, dx, dy, dz)
-
     moved_vertex_indexes = _edge_vertex_indexes(shape, edge)
-    return _move_vertices_by_convex_rebuild(shape, moved_vertex_indexes, (dx, dy, dz))
+    original_vertex_count = Picker.indexed_map(shape, SelectionKind.VERTEX).Extent()
+
+    try:
+        result = _move_vertices_by_convex_rebuild(
+            shape, moved_vertex_indexes, (dx, dy, dz)
+        )
+        result_vertex_count = Picker.indexed_map(result, SelectionKind.VERTEX).Extent()
+        if result_vertex_count == original_vertex_count:
+            return result
+    except CommandError:
+        pass
+    except Exception as exc:
+        if not _is_occt_exception(exc):
+            raise
+
+    return _move_edge_via_best_face(shape, edge_index, edge, dx, dy, dz)
 
 
 def apply_move_edge_controlled(
@@ -573,11 +1062,18 @@ def move_vertex_controlled(
     dy: float,
     dz: float,
 ) -> TopoDS_Shape:
-    """Move one vertex on a simple convex planar solid."""
+    """Move one vertex by rebuilding only the affected faces."""
     _validate_move_vector(dx, dy, dz)
     validate_shape(shape)
     _vertex_by_index(shape, vertex_index)
-    return _move_vertices_by_convex_rebuild(shape, {vertex_index}, (dx, dy, dz))
+    return _move_vertices_via_face_rebuild(
+        shape,
+        {vertex_index},
+        dx,
+        dy,
+        dz,
+        allow_nonplanar_faces=True,
+    )
 
 
 def apply_move_vertex_controlled(
@@ -599,673 +1095,27 @@ def supports_move_vertex_controlled(shape: TopoDS_Shape, vertex_index: int) -> b
     """Return whether vertex move can rebuild this shape."""
     try:
         validate_shape(shape)
-        _assert_all_faces_planar(shape)
         _vertex_by_index(shape, vertex_index)
+        for dx, dy, dz in (
+            (1.0, 0.0, 0.0),
+            (-1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, -1.0, 0.0),
+            (0.0, 0.0, 1.0),
+            (0.0, 0.0, -1.0),
+        ):
+            try:
+                _move_vertices_via_face_rebuild(
+                    shape,
+                    {vertex_index},
+                    dx,
+                    dy,
+                    dz,
+                    allow_nonplanar_faces=True,
+                )
+                return True
+            except CommandError:
+                continue
     except (CommandError, IndexError, TypeError, AttributeError):
         return False
-    return True
-
-
-def top_planar_face_index(shape: TopoDS_Shape) -> int:
-    """Find the highest planar face whose oriented normal points along +Z."""
-    validate_shape(shape)
-    face_map = Picker.indexed_map(shape, SelectionKind.FACE)
-    best_index: int | None = None
-    best_z: float | None = None
-
-    from OCP.TopoDS import TopoDS
-
-    for index in range(1, face_map.Extent() + 1):
-        face = TopoDS.Face_s(face_map.FindKey(index))
-        try:
-            normal = _planar_face_normal(face)
-        except UnsupportedTopologyError:
-            continue
-        if normal.Z() < 0.99:
-            continue
-        center_z = _face_center_z(face)
-        if best_z is None or center_z > best_z:
-            best_index = index
-            best_z = center_z
-
-    if best_index is None:
-        raise UnsupportedTopologyError("No upward planar face found.")
-    return best_index
-
-
-def _face_by_index(shape: TopoDS_Shape, face_index: int) -> TopoDS_Face:
-    from OCP.TopoDS import TopoDS
-
-    face_map = Picker.indexed_map(shape, SelectionKind.FACE)
-    if face_index < 1 or face_index > face_map.Extent():
-        raise IndexError(f"Face index out of range: {face_index}")
-    return TopoDS.Face_s(face_map.FindKey(face_index))
-
-
-def _edge_by_index(shape: TopoDS_Shape, edge_index: int) -> TopoDS_Edge:
-    from OCP.TopoDS import TopoDS
-
-    edge_map = Picker.indexed_map(shape, SelectionKind.EDGE)
-    if edge_index < 1 or edge_index > edge_map.Extent():
-        raise IndexError(f"Edge index out of range: {edge_index}")
-    return TopoDS.Edge_s(edge_map.FindKey(edge_index))
-
-
-def _vertex_by_index(shape: TopoDS_Shape, vertex_index: int):
-    from OCP.TopoDS import TopoDS
-
-    vertex_map = Picker.indexed_map(shape, SelectionKind.VERTEX)
-    if vertex_index < 1 or vertex_index > vertex_map.Extent():
-        raise IndexError(f"Vertex index out of range: {vertex_index}")
-    return TopoDS.Vertex_s(vertex_map.FindKey(vertex_index))
-
-
-def _validate_move_vector(dx: float, dy: float, dz: float) -> None:
-    if dx == 0 and dy == 0 and dz == 0:
-        raise ValueError("Move vector must be non-zero.")
-
-
-def _edge_vertex_indexes(shape: TopoDS_Shape, edge: TopoDS_Edge) -> set[int]:
-    from OCP.TopAbs import TopAbs_VERTEX
-    from OCP.TopExp import TopExp
-    from OCP.TopTools import TopTools_IndexedMapOfShape
-
-    shape_vertices = Picker.indexed_map(shape, SelectionKind.VERTEX)
-    edge_vertices = TopTools_IndexedMapOfShape()
-    TopExp.MapShapes_s(edge, TopAbs_VERTEX, edge_vertices)
-    indexes = {
-        shape_vertices.FindIndex(edge_vertices.FindKey(index))
-        for index in range(1, edge_vertices.Extent() + 1)
-    }
-    indexes.discard(0)
-    if len(indexes) != 2:
-        raise UnsupportedTopologyError("Edge move requires exactly two vertices.")
-    return indexes
-
-
-def _face_vertex_indexes(shape: TopoDS_Shape, face: TopoDS_Face) -> set[int]:
-    from OCP.TopAbs import TopAbs_VERTEX
-    from OCP.TopExp import TopExp
-    from OCP.TopTools import TopTools_IndexedMapOfShape
-
-    shape_vertices = Picker.indexed_map(shape, SelectionKind.VERTEX)
-    face_vertices = TopTools_IndexedMapOfShape()
-    TopExp.MapShapes_s(face, TopAbs_VERTEX, face_vertices)
-    indexes = {
-        shape_vertices.FindIndex(face_vertices.FindKey(index))
-        for index in range(1, face_vertices.Extent() + 1)
-    }
-    indexes.discard(0)
-    if len(indexes) < 3:
-        raise UnsupportedTopologyError("Face move requires at least three vertices.")
-    return indexes
-
-
-def _move_vertices_by_convex_rebuild(
-    shape: TopoDS_Shape,
-    moved_vertex_indexes: set[int],
-    vector: tuple[float, float, float],
-) -> TopoDS_Shape:
-    _assert_all_faces_planar(shape)
-    points = _shape_vertex_points(shape)
-    if len(points) < 4:
-        raise UnsupportedTopologyError("Convex rebuild requires at least four points.")
-
-    dx, dy, dz = vector
-    moved_points = [
-        (x + dx, y + dy, z + dz) if index in moved_vertex_indexes else (x, y, z)
-        for index, (x, y, z) in enumerate(points, start=1)
-    ]
-    rebuilt = _build_convex_polyhedron(moved_points)
-    validate_shape(rebuilt)
-    return cleanup_shape(rebuilt)
-
-
-def _assert_all_faces_planar(shape: TopoDS_Shape) -> None:
-    from OCP.TopoDS import TopoDS
-
-    face_map = Picker.indexed_map(shape, SelectionKind.FACE)
-    for index in range(1, face_map.Extent() + 1):
-        if not _is_planar_face(TopoDS.Face_s(face_map.FindKey(index))):
-            raise UnsupportedTopologyError(
-                "Edge/vertex move supports only planar-faced solids."
-            )
-
-
-def _shape_vertex_points(shape: TopoDS_Shape) -> list[tuple[float, float, float]]:
-    from OCP.BRep import BRep_Tool
-    from OCP.TopoDS import TopoDS
-
-    vertex_map = Picker.indexed_map(shape, SelectionKind.VERTEX)
-    points = []
-    for index in range(1, vertex_map.Extent() + 1):
-        point = BRep_Tool.Pnt_s(TopoDS.Vertex_s(vertex_map.FindKey(index)))
-        points.append((point.X(), point.Y(), point.Z()))
-    return points
-
-
-def _build_convex_polyhedron(
-    points: list[tuple[float, float, float]],
-) -> TopoDS_Shape:
-    faces = _convex_hull_faces(points)
-    if len(faces) < 4:
-        raise UnsupportedTopologyError("Moved points do not form a closed solid.")
-
-    from OCP.BRepBuilderAPI import (
-        BRepBuilderAPI_MakeFace,
-        BRepBuilderAPI_MakePolygon,
-        BRepBuilderAPI_MakeSolid,
-        BRepBuilderAPI_Sewing,
-    )
-    from OCP.gp import gp_Pnt
-    from OCP.TopoDS import TopoDS
-
-    sewing = BRepBuilderAPI_Sewing(1e-7)
-    for face_indexes in faces:
-        polygon = BRepBuilderAPI_MakePolygon()
-        for point_index in face_indexes:
-            polygon.Add(gp_Pnt(*points[point_index]))
-        polygon.Close()
-        face_builder = BRepBuilderAPI_MakeFace(polygon.Wire(), True)
-        if not face_builder.IsDone():
-            raise UnsupportedTopologyError("Failed to rebuild a moved face.")
-        sewing.Add(face_builder.Face())
-
-    sewing.Perform()
-    shell = TopoDS.Shell_s(sewing.SewedShape())
-    solid_builder = BRepBuilderAPI_MakeSolid(shell)
-    solid = solid_builder.Solid()
-    validate_shape(solid)
-    return solid
-
-
-def _convex_hull_faces(points: list[tuple[float, float, float]]) -> list[list[int]]:
-    tolerance = 1e-7
-    centroid = _average_point(points)
-    face_sets: set[frozenset[int]] = set()
-
-    for i in range(len(points) - 2):
-        for j in range(i + 1, len(points) - 1):
-            for k in range(j + 1, len(points)):
-                normal = _cross(
-                    _sub(points[j], points[i]),
-                    _sub(points[k], points[i]),
-                )
-                if _norm(normal) < tolerance:
-                    continue
-                distances = [_dot(normal, _sub(point, points[i])) for point in points]
-                if not (
-                    all(distance >= -tolerance for distance in distances)
-                    or all(distance <= tolerance for distance in distances)
-                ):
-                    continue
-
-                face_set = frozenset(
-                    index
-                    for index, distance in enumerate(distances)
-                    if abs(distance) <= tolerance
-                )
-                if len(face_set) >= 3:
-                    face_sets.add(face_set)
-
-    return [_ordered_face(points, sorted(face_set), centroid) for face_set in face_sets]
-
-
-def _ordered_face(
-    points: list[tuple[float, float, float]],
-    indexes: list[int],
-    centroid: tuple[float, float, float],
-) -> list[int]:
-    face_center = _average_point([points[index] for index in indexes])
-    normal = _newell_normal([points[index] for index in indexes])
-    if _norm(normal) < 1e-7:
-        normal = _cross(
-            _sub(points[indexes[1]], points[indexes[0]]),
-            _sub(points[indexes[2]], points[indexes[0]]),
-        )
-    normal = _normalize(normal)
-    if _dot(normal, _sub(face_center, centroid)) < 0:
-        normal = _scale(normal, -1.0)
-
-    axis_u = _normalize(_sub(points[indexes[0]], face_center))
-    axis_v = _cross(normal, axis_u)
-    ordered = sorted(
-        indexes,
-        key=lambda index: _angle_on_plane(points[index], face_center, axis_u, axis_v),
-    )
-    polygon_normal = _newell_normal([points[index] for index in ordered])
-    if _dot(polygon_normal, _sub(face_center, centroid)) < 0:
-        ordered.reverse()
-    return ordered
-
-
-def _angle_on_plane(
-    point: tuple[float, float, float],
-    origin: tuple[float, float, float],
-    axis_u: tuple[float, float, float],
-    axis_v: tuple[float, float, float],
-) -> float:
-    vector = _sub(point, origin)
-    return math.atan2(_dot(vector, axis_v), _dot(vector, axis_u))
-
-
-def _average_point(
-    points: list[tuple[float, float, float]],
-) -> tuple[float, float, float]:
-    count = float(len(points))
-    return (
-        sum(point[0] for point in points) / count,
-        sum(point[1] for point in points) / count,
-        sum(point[2] for point in points) / count,
-    )
-
-
-def _newell_normal(
-    points: list[tuple[float, float, float]],
-) -> tuple[float, float, float]:
-    normal_x = 0.0
-    normal_y = 0.0
-    normal_z = 0.0
-    for current, following in zip(points, [*points[1:], points[0]]):
-        normal_x += (current[1] - following[1]) * (current[2] + following[2])
-        normal_y += (current[2] - following[2]) * (current[0] + following[0])
-        normal_z += (current[0] - following[0]) * (current[1] + following[1])
-    return normal_x, normal_y, normal_z
-
-
-def _sub(
-    left: tuple[float, float, float],
-    right: tuple[float, float, float],
-) -> tuple[float, float, float]:
-    return left[0] - right[0], left[1] - right[1], left[2] - right[2]
-
-
-def _cross(
-    left: tuple[float, float, float],
-    right: tuple[float, float, float],
-) -> tuple[float, float, float]:
-    return (
-        left[1] * right[2] - left[2] * right[1],
-        left[2] * right[0] - left[0] * right[2],
-        left[0] * right[1] - left[1] * right[0],
-    )
-
-
-def _dot(
-    left: tuple[float, float, float],
-    right: tuple[float, float, float],
-) -> float:
-    return left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
-
-
-def _norm(vector: tuple[float, float, float]) -> float:
-    return _dot(vector, vector) ** 0.5
-
-
-def _normalize(vector: tuple[float, float, float]) -> tuple[float, float, float]:
-    length = _norm(vector)
-    if length == 0:
-        raise UnsupportedTopologyError("Cannot normalize a zero vector.")
-    return vector[0] / length, vector[1] / length, vector[2] / length
-
-
-def _scale(
-    vector: tuple[float, float, float],
-    factor: float,
-) -> tuple[float, float, float]:
-    return vector[0] * factor, vector[1] * factor, vector[2] * factor
-
-
-def edge_supports_direct_round(shape: TopoDS_Shape, edge_index: int) -> bool:
-    """Return whether fillet/chamfer can target only this edge safely."""
-    validate_shape(shape)
-    edge = _edge_by_index(shape, edge_index)
-    try:
-        _assert_sharp_planar_edge(shape, edge)
-        _assert_edge_has_single_fillet_contour(shape, edge)
-    except CommandError:
-        return False
-    return True
-
-
-def _updated_fillet_history(
-    shape: TopoDS_Shape,
-    meta: dict,
-    edge_index: int,
-    radius: float,
-) -> dict:
-    next_meta = dict(meta)
-    history = next_meta.get(_FILLET_HISTORY_KEY)
-    if not history:
-        next_meta[_FILLET_HISTORY_KEY] = {
-            "base_shape": shape,
-            "edge_specs": [(edge_index, radius)],
-        }
-        return next_meta
-
-    base_shape = history["base_shape"]
-    edge_specs = list(history["edge_specs"])
-    mapped_index = _map_edge_index_between_shapes(shape, edge_index, base_shape)
-    if mapped_index is None:
-        next_meta.pop(_FILLET_HISTORY_KEY, None)
-        return next_meta
-
-    _append_unique_edge_spec(edge_specs, mapped_index, radius)
-    next_meta[_FILLET_HISTORY_KEY] = {
-        "base_shape": base_shape,
-        "edge_specs": edge_specs,
-    }
-    return next_meta
-
-
-def _try_rebased_fillet(scene_object, edge_index: int, radius: float):
-    history = scene_object.meta.get(_FILLET_HISTORY_KEY)
-    if not history:
-        raise UnsupportedTopologyError(
-            "Fillet would affect multiple tangent edges; operation cancelled."
-        )
-
-    base_shape = history["base_shape"]
-    edge_specs = list(history["edge_specs"])
-    mapped_index = _map_edge_index_between_shapes(
-        scene_object.shape,
-        edge_index,
-        base_shape,
-    )
-    if mapped_index is None:
-        raise UnsupportedTopologyError(
-            "Selected edge cannot be mapped back to the fillet base shape."
-        )
-
-    _append_unique_edge_spec(edge_specs, mapped_index, radius)
-    result = fillet_edges(base_shape, edge_specs)
-    meta = dict(scene_object.meta)
-    meta[_FILLET_HISTORY_KEY] = {
-        "base_shape": base_shape,
-        "edge_specs": edge_specs,
-    }
-    return result, meta
-
-
-def _append_unique_edge_spec(
-    edge_specs: list[tuple[int, float]],
-    edge_index: int,
-    radius: float,
-) -> None:
-    for index, (existing_index, _) in enumerate(edge_specs):
-        if existing_index == edge_index:
-            edge_specs[index] = (edge_index, radius)
-            return
-    edge_specs.append((edge_index, radius))
-
-
-def _map_edge_index_between_shapes(
-    source_shape: TopoDS_Shape,
-    source_edge_index: int,
-    target_shape: TopoDS_Shape,
-) -> int | None:
-    source_edge = _edge_by_index(source_shape, source_edge_index)
-    try:
-        source_segment = _line_segment_from_edge(source_edge)
-    except UnsupportedTopologyError:
-        return None
-
-    target_edges = Picker.indexed_map(target_shape, SelectionKind.EDGE)
-    best_index: int | None = None
-    best_score: float | None = None
-    for index in range(1, target_edges.Extent() + 1):
-        target_edge = _edge_by_index(target_shape, index)
-        try:
-            target_segment = _line_segment_from_edge(target_edge)
-        except UnsupportedTopologyError:
-            continue
-        score = _line_segment_mapping_score(source_segment, target_segment)
-        if score is None:
-            continue
-        if best_score is None or score < best_score:
-            best_index = index
-            best_score = score
-    return best_index
-
-
-def _line_segment_from_edge(
-    edge: TopoDS_Edge,
-) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
-    from OCP.BRepAdaptor import BRepAdaptor_Curve
-    from OCP.GeomAbs import GeomAbs_Line
-
-    curve = BRepAdaptor_Curve(edge)
-    if curve.GetType() != GeomAbs_Line:
-        raise UnsupportedTopologyError("Only straight edges can be remapped.")
-    start = curve.Value(curve.FirstParameter())
-    end = curve.Value(curve.LastParameter())
-    return (start.X(), start.Y(), start.Z()), (end.X(), end.Y(), end.Z())
-
-
-def _line_segment_mapping_score(
-    source: tuple[tuple[float, float, float], tuple[float, float, float]],
-    target: tuple[tuple[float, float, float], tuple[float, float, float]],
-) -> float | None:
-    tolerance = 1e-5
-    source_start, source_end = source
-    target_start, target_end = target
-    source_direction = _normalize(_sub(source_end, source_start))
-    target_vector = _sub(target_end, target_start)
-    target_length = _norm(target_vector)
-    if target_length <= tolerance:
-        return None
-    target_direction = _scale(target_vector, 1.0 / target_length)
-    if abs(_dot(source_direction, target_direction)) < 0.999:
-        return None
-
-    distances = (
-        _point_line_distance(source_start, target_start, target_direction),
-        _point_line_distance(source_end, target_start, target_direction),
-    )
-    if max(distances) > tolerance:
-        return None
-
-    projections = (
-        _dot(_sub(source_start, target_start), target_direction),
-        _dot(_sub(source_end, target_start), target_direction),
-    )
-    if min(projections) < -tolerance or max(projections) > target_length + tolerance:
-        return None
-    return sum(distances) + abs(min(projections)) * 1e-9
-
-
-def _point_line_distance(
-    point: tuple[float, float, float],
-    line_point: tuple[float, float, float],
-    line_direction: tuple[float, float, float],
-) -> float:
-    return _norm(_cross(_sub(point, line_point), line_direction))
-
-
-def _assert_sharp_planar_edge(shape: TopoDS_Shape, edge: TopoDS_Edge) -> None:
-    adjacent_faces = _edge_adjacent_faces(shape, edge)
-    if len(adjacent_faces) != 2:
-        raise UnsupportedTopologyError(
-            "Edge operation requires exactly two adjacent faces."
-        )
-    if not all(_is_planar_face(face) for face in adjacent_faces):
-        raise UnsupportedTopologyError(
-            "Edge operation is allowed only between planar faces."
-        )
-
-    first_normal = _planar_face_normal(adjacent_faces[0])
-    second_normal = _planar_face_normal(adjacent_faces[1])
-    if abs(first_normal.Dot(second_normal)) > 0.999:
-        raise UnsupportedTopologyError("Edge operation requires a sharp planar edge.")
-
-
-def _assert_supported_round_contour(
-    builder,
-    edge: TopoDS_Edge,
-    operation_name: str,
-) -> None:
-    contour_index = builder.Contour(edge)
-    if contour_index <= 0:
-        raise OperationFailedError(f"{operation_name} contour was not created.")
-    edge_count = builder.NbEdges(contour_index)
-    if edge_count == 1:
-        return
-    raise UnsupportedTopologyError(
-        f"{operation_name} would affect {edge_count} tangent edges; "
-        "operation cancelled."
-    )
-
-
-def _assert_round_surface_count(
-    previous_round_count: int,
-    shape: TopoDS_Shape,
-    expected_added: int,
-) -> None:
-    round_count = _count_cylindrical_faces(shape)
-    if round_count != previous_round_count + expected_added:
-        raise UnsupportedTopologyError(
-            "Fillet changed an unexpected number of round surfaces; "
-            "operation cancelled."
-        )
-
-
-def _count_cylindrical_faces(shape: TopoDS_Shape) -> int:
-    from OCP.BRepAdaptor import BRepAdaptor_Surface
-    from OCP.GeomAbs import GeomAbs_Cylinder
-    from OCP.TopoDS import TopoDS
-
-    face_map = Picker.indexed_map(shape, SelectionKind.FACE)
-    return sum(
-        1
-        for index in range(1, face_map.Extent() + 1)
-        if BRepAdaptor_Surface(TopoDS.Face_s(face_map.FindKey(index))).GetType()
-        == GeomAbs_Cylinder
-    )
-
-
-def _assert_edge_has_single_fillet_contour(
-    shape: TopoDS_Shape,
-    edge: TopoDS_Edge,
-) -> None:
-    from OCP.BRepFilletAPI import BRepFilletAPI_MakeFillet
-
-    builder = BRepFilletAPI_MakeFillet(shape)
-    builder.Add(1.0, edge)
-    _assert_supported_round_contour(builder, edge, "Fillet")
-
-
-def _edge_adjacent_faces(
-    shape: TopoDS_Shape,
-    edge: TopoDS_Edge,
-) -> list[TopoDS_Face]:
-    from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE
-    from OCP.TopExp import TopExp
-    from OCP.TopoDS import TopoDS
-    from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
-
-    edge_face_map = TopTools_IndexedDataMapOfShapeListOfShape()
-    TopExp.MapShapesAndUniqueAncestors_s(
-        shape,
-        TopAbs_EDGE,
-        TopAbs_FACE,
-        edge_face_map,
-    )
-    if not edge_face_map.Contains(edge):
-        raise UnsupportedTopologyError("Edge does not belong to the shape.")
-    faces = edge_face_map.FindFromKey(edge)
-    return [TopoDS.Face_s(face) for face in faces]
-
-
-def _is_planar_face(face: TopoDS_Face) -> bool:
-    from OCP.BRepAdaptor import BRepAdaptor_Surface
-    from OCP.GeomAbs import GeomAbs_Plane
-
-    return BRepAdaptor_Surface(face).GetType() == GeomAbs_Plane
-
-
-def _planar_face_normal(face: TopoDS_Face):
-    from OCP.BRepAdaptor import BRepAdaptor_Surface
-    from OCP.GeomAbs import GeomAbs_Plane
-    from OCP.gp import gp_Dir
-    from OCP.TopAbs import TopAbs_REVERSED
-
-    surface = BRepAdaptor_Surface(face)
-    if surface.GetType() != GeomAbs_Plane:
-        raise UnsupportedTopologyError("Only planar faces can be extruded.")
-
-    direction = surface.Plane().Axis().Direction()
-    if face.Orientation() == TopAbs_REVERSED:
-        direction = gp_Dir(-direction.X(), -direction.Y(), -direction.Z())
-    return direction
-
-
-def _face_center_z(face: TopoDS_Face) -> float:
-    from OCP.BRepGProp import BRepGProp
-    from OCP.GProp import GProp_GProps
-
-    props = GProp_GProps()
-    BRepGProp.SurfaceProperties_s(face, props)
-    return props.CentreOfMass().Z()
-
-
-def _run_boolean(shape_a, shape_b, operation_cls, error_message: str):
-    operation = operation_cls(shape_a, shape_b)
-    operation.Build()
-    if not operation.IsDone():
-        raise OperationFailedError(error_message)
-
-    result = operation.Shape()
-    validate_shape(result)
-    return cleanup_shape(result)
-
-
-def _workplane_from_face(face: TopoDS_Face):
-    from cad_app.workplane import Workplane
-
-    return Workplane.from_face(face)
-
-
-def _move_edge_via_best_face(
-    shape: TopoDS_Shape,
-    edge_index: int,
-    edge: TopoDS_Edge,
-    dx: float,
-    dy: float,
-    dz: float,
-) -> TopoDS_Shape:
-    """Apply face extrude to both adjacent faces for edge move on
-    complex bodies. Projects the move vector onto each face normal
-    and applies sequential boolean push/pull."""
-    faces = _edge_adjacent_faces(shape, edge)
-    if len(faces) != 2:
-        raise UnsupportedTopologyError(
-            "Edge operation requires exactly two adjacent faces."
-        )
-
-    face_map = Picker.indexed_map(shape, SelectionKind.FACE)
-    face_moves: list[tuple[int, float]] = []
-    for face in faces:
-        normal = _planar_face_normal(face)
-        proj = dx * normal.X() + dy * normal.Y() + dz * normal.Z()
-        if abs(proj) > 1e-9:
-            idx = face_map.FindIndex(face)
-            if idx > 0:
-                face_moves.append((idx, proj))
-
-    if not face_moves:
-        raise UnsupportedTopologyError(
-            "Move vector has no projection on adjacent faces."
-        )
-
-    result = shape
-    for face_idx, proj_distance in face_moves:
-        result = extrude_face(result, face_idx, proj_distance)
-
-    return result
-
-
-def _vectors_parallel(
-    a: tuple[float, float, float],
-    b: tuple[float, float, float],
-) -> bool:
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2] > 0.9999
+    return False

@@ -52,6 +52,17 @@ class ObjectPickResult:
     distance_px: float = 0.0
 
 
+@dataclass(frozen=True)
+class PickCandidate:
+    """Selectable candidate returned for overlapping or select-through picks."""
+
+    selection: SelectionRef
+    depth: float
+    distance_px: float
+    label: str
+    result: object
+
+
 class Picker:
     """Maps selected OCP subshapes to stable scene UUID + topology indexes."""
 
@@ -154,17 +165,40 @@ class Picker:
         y: int,
         tolerance_px: float = 8.0,
     ) -> ObjectPickResult | None:
-        result = self.pick_face_result_at(view, x, y, tolerance_px)
-        if result is None:
+        results = self.pick_object_results_at(view, x, y, tolerance_px)
+        if not results:
             return None
-        return ObjectPickResult(
-            selection=SelectionRef(
-                item_id=result.selection.item_id,
-                kind=SelectionKind.OBJECT,
-                index=0,
+        return results[0]
+
+    def pick_object_results_at(
+        self,
+        view: V3d_View,
+        x: int,
+        y: int,
+        tolerance_px: float = 8.0,
+    ) -> list[ObjectPickResult]:
+        face_results = self.pick_face_results_at(view, x, y, tolerance_px)
+        best_by_item: dict[str, ObjectPickResult] = {}
+        for result in face_results:
+            item_id = result.selection.item_id
+            if item_id in best_by_item:
+                continue
+            best_by_item[item_id] = ObjectPickResult(
+                selection=SelectionRef(
+                    item_id=item_id,
+                    kind=SelectionKind.OBJECT,
+                    index=0,
+                ),
+                depth=result.depth,
+                distance_px=result.distance_px,
+            )
+        return sorted(
+            best_by_item.values(),
+            key=lambda result: (
+                result.distance_px,
+                result.depth,
+                result.selection.item_id,
             ),
-            depth=result.depth,
-            distance_px=result.distance_px,
         )
 
     def pick_face_at(
@@ -183,10 +217,20 @@ class Picker:
         y: int,
         tolerance_px: float = 8.0,
     ) -> FacePickResult | None:
-        best_result: FacePickResult | None = None
-        best_depth = math.inf
-        best_distance = math.inf
-        best_priority = math.inf
+        results = self.pick_face_results_at(view, x, y, tolerance_px)
+        if not results:
+            return None
+        return results[0]
+
+    def pick_face_results_at(
+        self,
+        view: V3d_View,
+        x: int,
+        y: int,
+        tolerance_px: float = 8.0,
+    ) -> list[FacePickResult]:
+        results_by_selection: dict[SelectionRef, FacePickResult] = {}
+        priorities_by_selection: dict[SelectionRef, int] = {}
         for offset_x, offset_y in self._face_pick_offsets(tolerance_px):
             ray = self._view_ray(
                 view,
@@ -199,7 +243,7 @@ class Picker:
             offset_distance = math.hypot(offset_x, offset_y)
             for scene_object in self._scene:
                 priority = self._face_pick_priority(scene_object.meta)
-                result = self._ray_pick_face(
+                results = self._ray_pick_faces(
                     scene_object.item_id,
                     scene_object.shape,
                     origin,
@@ -207,23 +251,34 @@ class Picker:
                     eye,
                     offset_distance,
                 )
-                if result is None:
-                    continue
-                if not self._is_better_face_pick(
-                    result.distance_px,
-                    result.depth,
-                    priority,
-                    best_distance,
-                    best_depth,
-                    best_priority,
-                ):
-                    continue
-                best_result = result
-                best_depth = result.depth
-                best_distance = result.distance_px
-                best_priority = priority
+                for result in results:
+                    current = results_by_selection.get(result.selection)
+                    current_priority = priorities_by_selection.get(
+                        result.selection,
+                        math.inf,
+                    )
+                    if current is not None and not self._is_better_face_pick(
+                        result.distance_px,
+                        result.depth,
+                        priority,
+                        current.distance_px,
+                        current.depth,
+                        current_priority,
+                    ):
+                        continue
+                    results_by_selection[result.selection] = result
+                    priorities_by_selection[result.selection] = priority
 
-        return best_result
+        return sorted(
+            results_by_selection.values(),
+            key=lambda result: (
+                result.distance_px,
+                priorities_by_selection[result.selection],
+                result.depth,
+                result.selection.item_id,
+                result.selection.index,
+            ),
+        )
 
     def pick_edge_at(
         self,
@@ -281,6 +336,49 @@ class Picker:
 
         return best_result
 
+    def pick_edge_results_at(
+        self,
+        view: V3d_View,
+        x: int,
+        y: int,
+        tolerance_px: float = 16.0,
+    ) -> list[EdgePickResult]:
+        results: list[EdgePickResult] = []
+        for scene_object in self._scene:
+            edge_map = self.indexed_map(scene_object.shape, SelectionKind.EDGE)
+            for index in range(1, edge_map.Extent() + 1):
+                metric = self._edge_screen_metric(
+                    view,
+                    edge_map.FindKey(index),
+                    float(x),
+                    float(y),
+                )
+                if metric is None:
+                    continue
+                distance, depth = metric
+                if distance > tolerance_px:
+                    continue
+                results.append(
+                    EdgePickResult(
+                        selection=SelectionRef(
+                            item_id=scene_object.item_id,
+                            kind=SelectionKind.EDGE,
+                            index=index,
+                        ),
+                        distance_px=distance,
+                        depth=depth,
+                    )
+                )
+        return sorted(
+            results,
+            key=lambda result: (
+                result.distance_px,
+                result.depth,
+                result.selection.item_id,
+                result.selection.index,
+            ),
+        )
+
     def pick_vertex_result_at(
         self,
         view: V3d_View,
@@ -325,6 +423,149 @@ class Picker:
 
         return best_result
 
+    def pick_vertex_results_at(
+        self,
+        view: V3d_View,
+        x: int,
+        y: int,
+        tolerance_px: float = 14.0,
+    ) -> list[VertexPickResult]:
+        results: list[VertexPickResult] = []
+        for scene_object in self._scene:
+            vertex_map = self.indexed_map(scene_object.shape, SelectionKind.VERTEX)
+            for index in range(1, vertex_map.Extent() + 1):
+                metric = self._vertex_screen_metric(
+                    view,
+                    vertex_map.FindKey(index),
+                    float(x),
+                    float(y),
+                )
+                if metric is None:
+                    continue
+                distance, depth = metric
+                if distance > tolerance_px:
+                    continue
+                results.append(
+                    VertexPickResult(
+                        selection=SelectionRef(
+                            item_id=scene_object.item_id,
+                            kind=SelectionKind.VERTEX,
+                            index=index,
+                        ),
+                        distance_px=distance,
+                        depth=depth,
+                    )
+                )
+        return sorted(
+            results,
+            key=lambda result: (
+                result.distance_px,
+                result.depth,
+                result.selection.item_id,
+                result.selection.index,
+            ),
+        )
+
+    def pick_candidates_at(
+        self,
+        view: V3d_View,
+        x: int,
+        y: int,
+        filter_name: SelectionKind | str,
+        *,
+        select_through: bool = False,
+    ) -> list[PickCandidate]:
+        kinds = self._selection_kinds_for_filter(filter_name)
+        if not select_through and len(kinds) == 1:
+            result = self._pick_first_result_at(view, x, y, kinds[0])
+            if result is None:
+                return []
+            selection = result.selection
+            return [
+                PickCandidate(
+                    selection=selection,
+                    depth=result.depth,
+                    distance_px=getattr(result, "distance_px", 0.0),
+                    label=self._candidate_label(selection),
+                    result=result,
+                )
+            ]
+
+        candidates: list[PickCandidate] = []
+        for kind in kinds:
+            if kind == SelectionKind.OBJECT:
+                results: list[object] = self.pick_object_results_at(view, x, y)
+            elif kind == SelectionKind.FACE:
+                results = self.pick_face_results_at(view, x, y)
+            elif kind == SelectionKind.EDGE:
+                results = self.pick_edge_results_at(view, x, y)
+            else:
+                results = self.pick_vertex_results_at(view, x, y)
+            for result in results:
+                candidates.append(
+                    PickCandidate(
+                        selection=result.selection,
+                        depth=result.depth,
+                        distance_px=getattr(result, "distance_px", 0.0),
+                        label=self._candidate_label(result.selection),
+                        result=result,
+                    )
+                )
+        candidates.sort(
+            key=lambda candidate: (
+                candidate.distance_px,
+                self._candidate_selection_priority(candidate.selection),
+                candidate.depth,
+                self._candidate_kind_priority(candidate.selection.kind),
+                candidate.selection.item_id,
+                candidate.selection.index,
+            )
+        )
+        if select_through:
+            return candidates
+        return candidates[:1]
+
+    def _pick_first_result_at(
+        self,
+        view: V3d_View,
+        x: int,
+        y: int,
+        kind: SelectionKind,
+    ):
+        if kind == SelectionKind.OBJECT:
+            return self.pick_object_result_at(view, x, y)
+        if kind == SelectionKind.FACE:
+            return self.pick_face_result_at(view, x, y)
+        if kind == SelectionKind.EDGE:
+            return self.pick_edge_result_at(view, x, y)
+        return self.pick_vertex_result_at(view, x, y)
+
+    def area_select(
+        self,
+        view: V3d_View,
+        start: tuple[int, int],
+        end: tuple[int, int],
+        filter_name: str,
+        *,
+        require_containment: bool,
+    ) -> list[SelectionRef]:
+        rect = self._normalized_rect(start, end)
+        selections: list[SelectionRef] = []
+        seen: set[SelectionRef] = set()
+        for kind in self._selection_kinds_for_filter(filter_name):
+            for selection, points in self._area_selection_entries(view, kind):
+                if selection in seen:
+                    continue
+                if not self._screen_points_match_rect(
+                    points,
+                    rect,
+                    require_containment=require_containment,
+                ):
+                    continue
+                selections.append(selection)
+                seen.add(selection)
+        return selections
+
     @classmethod
     def indexed_map(
         cls,
@@ -358,6 +599,196 @@ class Picker:
         if normalized_kind == SelectionKind.VERTEX:
             return TopAbs_VERTEX
         raise ValueError(f"Unsupported selection kind: {kind}")
+
+    @staticmethod
+    def _selection_kinds_for_filter(
+        filter_name: SelectionKind | str,
+    ) -> tuple[SelectionKind, ...]:
+        if isinstance(filter_name, SelectionKind):
+            return (filter_name,)
+        normalized = str(filter_name).lower().replace(" ", "_")
+        if normalized in {"all", "all_items"}:
+            return (
+                SelectionKind.OBJECT,
+                SelectionKind.FACE,
+                SelectionKind.EDGE,
+                SelectionKind.VERTEX,
+            )
+        if normalized in {"body", "bodies", "object", "objects"}:
+            return (SelectionKind.OBJECT,)
+        if normalized in {"face", "faces"}:
+            return (SelectionKind.FACE,)
+        if normalized in {"edge", "edges"}:
+            return (SelectionKind.EDGE,)
+        if normalized in {"vertex", "vertices"}:
+            return (SelectionKind.VERTEX,)
+        return (SelectionKind(filter_name),)
+
+    @staticmethod
+    def _candidate_kind_priority(kind: SelectionKind) -> int:
+        priorities = {
+            SelectionKind.FACE: 0,
+            SelectionKind.EDGE: 1,
+            SelectionKind.VERTEX: 2,
+            SelectionKind.OBJECT: 3,
+        }
+        return priorities[kind]
+
+    def _candidate_selection_priority(self, selection: SelectionRef) -> int:
+        if (
+            selection.kind == SelectionKind.FACE
+            and self._scene.get(selection.item_id).meta.get("kind") == "sketch_profile"
+        ):
+            return 0
+        return 1
+
+    @staticmethod
+    def _candidate_label(selection: SelectionRef) -> str:
+        if selection.kind == SelectionKind.OBJECT:
+            return f"Body {selection.item_id[:8]}"
+        return (
+            f"{selection.kind.value.title()} {selection.index} "
+            f"on {selection.item_id[:8]}"
+        )
+
+    def _area_selection_entries(
+        self,
+        view: V3d_View,
+        kind: SelectionKind,
+    ) -> list[tuple[SelectionRef, list[tuple[float, float, float]]]]:
+        entries: list[tuple[SelectionRef, list[tuple[float, float, float]]]] = []
+        for scene_object in self._scene:
+            if kind == SelectionKind.OBJECT:
+                entries.append(
+                    (
+                        SelectionRef(
+                            item_id=scene_object.item_id,
+                            kind=SelectionKind.OBJECT,
+                            index=0,
+                        ),
+                        self._shape_screen_points(view, scene_object.shape),
+                    )
+                )
+                continue
+
+            indexed_map = self.indexed_map(scene_object.shape, kind)
+            for index in range(1, indexed_map.Extent() + 1):
+                shape = indexed_map.FindKey(index)
+                if kind == SelectionKind.EDGE:
+                    points = self._edge_screen_polyline(view, shape)
+                elif kind == SelectionKind.VERTEX:
+                    point = self._vertex_screen_point(view, shape)
+                    points = [] if point is None else [point]
+                else:
+                    points = self._shape_screen_points(view, shape)
+                entries.append(
+                    (
+                        SelectionRef(
+                            item_id=scene_object.item_id,
+                            kind=kind,
+                            index=index,
+                        ),
+                        points,
+                    )
+                )
+        return entries
+
+    @staticmethod
+    def _normalized_rect(
+        start: tuple[int, int],
+        end: tuple[int, int],
+    ) -> tuple[float, float, float, float]:
+        return (
+            float(min(start[0], end[0])),
+            float(min(start[1], end[1])),
+            float(max(start[0], end[0])),
+            float(max(start[1], end[1])),
+        )
+
+    @classmethod
+    def _screen_points_match_rect(
+        cls,
+        points: list[tuple[float, float, float]],
+        rect: tuple[float, float, float, float],
+        *,
+        require_containment: bool,
+    ) -> bool:
+        if not points:
+            return False
+        if require_containment:
+            return all(
+                cls._point_in_rect((point[0], point[1]), rect) for point in points
+            )
+        return cls._point_bbox_intersects_rect(points, rect)
+
+    @staticmethod
+    def _point_in_rect(
+        point: tuple[float, float],
+        rect: tuple[float, float, float, float],
+    ) -> bool:
+        left, top, right, bottom = rect
+        return left <= point[0] <= right and top <= point[1] <= bottom
+
+    @staticmethod
+    def _point_bbox_intersects_rect(
+        points: list[tuple[float, float, float]],
+        rect: tuple[float, float, float, float],
+    ) -> bool:
+        left, top, right, bottom = rect
+        point_left = min(point[0] for point in points)
+        point_top = min(point[1] for point in points)
+        point_right = max(point[0] for point in points)
+        point_bottom = max(point[1] for point in points)
+        return not (
+            point_right < left
+            or point_left > right
+            or point_bottom < top
+            or point_top > bottom
+        )
+
+    @staticmethod
+    def _shape_screen_points(
+        view: V3d_View,
+        shape: TopoDS_Shape,
+    ) -> list[tuple[float, float, float]]:
+        from OCP.Bnd import Bnd_Box
+        from OCP.BRepBndLib import BRepBndLib
+
+        bounds = Bnd_Box()
+        BRepBndLib.Add_s(shape, bounds)
+        if bounds.IsVoid():
+            return []
+        min_x, min_y, min_z, max_x, max_y, max_z = bounds.Get()
+        values = (min_x, min_y, min_z, max_x, max_y, max_z)
+        if not all(math.isfinite(float(value)) for value in values):
+            return []
+
+        eye = tuple(float(value) for value in view.Eye())
+        points: list[tuple[float, float, float]] = []
+        for world_x in (min_x, max_x):
+            for world_y in (min_y, max_y):
+                for world_z in (min_z, max_z):
+                    screen_x, screen_y = view.Convert(world_x, world_y, world_z)
+                    depth = math.dist(
+                        eye,
+                        (float(world_x), float(world_y), float(world_z)),
+                    )
+                    points.append((float(screen_x), float(screen_y), depth))
+        return points
+
+    @staticmethod
+    def _vertex_screen_point(
+        view: V3d_View,
+        vertex_shape: TopoDS_Shape,
+    ) -> tuple[float, float, float] | None:
+        from OCP.BRep import BRep_Tool
+        from OCP.TopoDS import TopoDS
+
+        point = BRep_Tool.Pnt_s(TopoDS.Vertex_s(vertex_shape))
+        screen_x, screen_y = view.Convert(point.X(), point.Y(), point.Z())
+        eye = tuple(float(value) for value in view.Eye())
+        depth = math.dist(eye, (point.X(), point.Y(), point.Z()))
+        return (float(screen_x), float(screen_y), depth)
 
     @classmethod
     def _edge_screen_metric(
@@ -397,6 +828,27 @@ class Picker:
         eye: tuple[float, float, float],
         distance_px: float = 0.0,
     ) -> FacePickResult | None:
+        results = self._ray_pick_faces(
+            item_id,
+            shape,
+            origin,
+            direction,
+            eye,
+            distance_px,
+        )
+        if not results:
+            return None
+        return results[0]
+
+    def _ray_pick_faces(
+        self,
+        item_id: str,
+        shape: TopoDS_Shape,
+        origin: tuple[float, float, float],
+        direction: tuple[float, float, float],
+        eye: tuple[float, float, float],
+        distance_px: float = 0.0,
+    ) -> list[FacePickResult]:
         from OCP.gp import gp_Dir, gp_Lin, gp_Pnt
         from OCP.IntCurvesFace import IntCurvesFace_ShapeIntersector
 
@@ -408,10 +860,9 @@ class Picker:
         )
         intersector.Perform(line, -1.0e9, 1.0e9)
         if not intersector.IsDone() or intersector.NbPnt() == 0:
-            return None
+            return []
 
-        best_result: FacePickResult | None = None
-        best_depth = math.inf
+        results: list[FacePickResult] = []
         for index in range(1, intersector.NbPnt() + 1):
             selection = self.selection_for_subshape(
                 item_id,
@@ -423,16 +874,15 @@ class Picker:
 
             point = intersector.Pnt(index)
             depth = math.dist(eye, (point.X(), point.Y(), point.Z()))
-            if depth >= best_depth:
-                continue
-            best_depth = depth
-            best_result = FacePickResult(
-                selection=selection,
-                depth=depth,
-                distance_px=distance_px,
+            results.append(
+                FacePickResult(
+                    selection=selection,
+                    depth=depth,
+                    distance_px=distance_px,
+                )
             )
 
-        return best_result
+        return sorted(results, key=lambda result: result.depth)
 
     @staticmethod
     def _face_pick_priority(meta: dict[str, object]) -> int:
@@ -485,6 +935,7 @@ class Picker:
         sample_count: int = 24,
     ) -> list[tuple[float, float, float]]:
         from OCP.BRepAdaptor import BRepAdaptor_Curve
+        from OCP.GeomAbs import GeomAbs_Line
         from OCP.TopoDS import TopoDS
 
         edge = TopoDS.Edge_s(edge_shape)
@@ -494,7 +945,7 @@ class Picker:
         if not math.isfinite(first) or not math.isfinite(last) or first == last:
             return []
 
-        samples = max(2, sample_count)
+        samples = 2 if curve.GetType() == GeomAbs_Line else max(2, sample_count)
         points: list[tuple[float, float, float]] = []
         eye_x, eye_y, eye_z = view.Eye()
         for offset in range(samples):

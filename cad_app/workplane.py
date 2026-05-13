@@ -8,6 +8,32 @@ from cad_app.commands import UnsupportedTopologyError
 
 
 @dataclass(frozen=True)
+class _FallbackPoint:
+    x: float
+    y: float
+    z: float
+
+    def X(self) -> float:
+        return self.x
+
+    def Y(self) -> float:
+        return self.y
+
+    def Z(self) -> float:
+        return self.z
+
+
+@dataclass(frozen=True)
+class _FallbackDir(_FallbackPoint):
+    def Crossed(self, other):
+        return _FallbackDir(
+            self.y * other.Z() - self.z * other.Y(),
+            self.z * other.X() - self.x * other.Z(),
+            self.x * other.Y() - self.y * other.X(),
+        )
+
+
+@dataclass(frozen=True)
 class Workplane:
     origin: object
     normal: object
@@ -16,13 +42,59 @@ class Workplane:
 
     @classmethod
     def world_xy(cls):
-        from OCP.gp import gp_Dir, gp_Pnt
+        try:
+            from OCP.gp import gp_Dir, gp_Pnt
+        except ModuleNotFoundError:
+            return cls(
+                origin=_FallbackPoint(0.0, 0.0, 0.0),
+                normal=_FallbackDir(0.0, 0.0, 1.0),
+                x_direction=_FallbackDir(1.0, 0.0, 0.0),
+                y_direction=_FallbackDir(0.0, 1.0, 0.0),
+            )
 
         return cls(
             origin=gp_Pnt(0.0, 0.0, 0.0),
             normal=gp_Dir(0.0, 0.0, 1.0),
             x_direction=gp_Dir(1.0, 0.0, 0.0),
             y_direction=gp_Dir(0.0, 1.0, 0.0),
+        )
+
+    @classmethod
+    def world_yz(cls):
+        try:
+            from OCP.gp import gp_Dir, gp_Pnt
+        except ModuleNotFoundError:
+            return cls(
+                origin=_FallbackPoint(0.0, 0.0, 0.0),
+                normal=_FallbackDir(1.0, 0.0, 0.0),
+                x_direction=_FallbackDir(0.0, 1.0, 0.0),
+                y_direction=_FallbackDir(0.0, 0.0, 1.0),
+            )
+
+        return cls(
+            origin=gp_Pnt(0.0, 0.0, 0.0),
+            normal=gp_Dir(1.0, 0.0, 0.0),
+            x_direction=gp_Dir(0.0, 1.0, 0.0),
+            y_direction=gp_Dir(0.0, 0.0, 1.0),
+        )
+
+    @classmethod
+    def world_xz(cls):
+        try:
+            from OCP.gp import gp_Dir, gp_Pnt
+        except ModuleNotFoundError:
+            return cls(
+                origin=_FallbackPoint(0.0, 0.0, 0.0),
+                normal=_FallbackDir(0.0, -1.0, 0.0),
+                x_direction=_FallbackDir(1.0, 0.0, 0.0),
+                y_direction=_FallbackDir(0.0, 0.0, 1.0),
+            )
+
+        return cls(
+            origin=gp_Pnt(0.0, 0.0, 0.0),
+            normal=gp_Dir(0.0, -1.0, 0.0),
+            x_direction=gp_Dir(1.0, 0.0, 0.0),
+            y_direction=gp_Dir(0.0, 0.0, 1.0),
         )
 
     @classmethod

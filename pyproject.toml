@@ -6,11 +6,13 @@ build-backend = "setuptools.build_meta"
 name = "cad_app"
 version = "0.1.0"
 description = "Direct modeling CAD app"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "PySide6",
   "cadquery-ocp",
   "build123d",
+  "shapely",
 ]
 
 [project.optional-dependencies]
@@ -18,6 +20,7 @@ dev = [
   "pytest",
   "black",
   "ruff",
+  "Pillow",
 ]
 
 [tool.pytest.ini_options]

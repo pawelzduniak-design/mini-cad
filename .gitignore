@@ -11,6 +11,10 @@ venv/
 .mypy_cache/
 logs/
 out/
+test-results/
+docs/tutorials/gifs/
+docs/tutorials/gifs_*/
+docs/tutorials/verification/
 *.log
 .DS_Store
 Thumbs.db

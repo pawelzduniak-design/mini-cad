@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication
 
 from cad_app.main_window import create_main_window
 from cad_app.scene import Scene
@@ -95,11 +95,9 @@ def main() -> int:
             _fail("Grid/reference objects are not visible")
         _pass("Grid/reference objects are present")
 
-        hint = widget.findChild(QLabel, "ContextHintOverlay")
-        if hint is None or hint.isHidden():
-            _fail("Startup hint is not visible")
-        if "Start:" not in hint.text():
-            _fail(f"Startup hint is not action-oriented: {hint.text()!r}")
+        state = widget.get_ui_state()
+        if "Start:" not in state.hint_text:
+            _fail(f"Startup hint is not action-oriented: {state.hint_text!r}")
         _pass("Startup hint tells the user what to do first")
 
         if "Select" not in widget._hud_labels["mode"].text():
@@ -108,12 +106,29 @@ def main() -> int:
         if "object" not in widget._hud_labels["axis"].text():
             _fail("Initial selection mode is not visible as Object")
         _pass("Initial selection mode is visible")
-        if _command_action_names(widget):
-            _fail("Adaptive command toolbar duplicates selection modes on startup")
-        _pass("No duplicate selection-mode actions in adaptive toolbar")
-        if not callable(viewer.display_orientation_gizmo):
-            _fail("Orientation gizmo renderer is missing")
-        _pass("Orientation gizmo renderer is available")
+        if set(_command_action_names(widget)) != {
+            "select_object",
+            "select_face",
+            "select_edge",
+            "select_vertex",
+            "select_through",
+        }:
+            _fail("Select mode commands are not visible on startup")
+        _pass("Select mode commands are visible on startup")
+
+        main_window.actions["category_sketch"].trigger()
+        app.processEvents()
+        QTest.qWait(150)
+        image = (
+            widget.screen()
+            .grabWindow(int(main_window.window.winId()))
+            .toImage()
+            .convertToFormat(QImage.Format.Format_RGB32)
+        )
+        unique_samples, very_dark = _sample_visual_energy(image)
+        if unique_samples < 4 or very_dark > 0:
+            _fail("Sketch mode introduced a black overlay")
+        _pass("Sketch mode does not introduce black viewport boxes")
 
         print(f"[INFO] Screenshot: {screenshot}")
         print("=== RESULT: PASS ===")

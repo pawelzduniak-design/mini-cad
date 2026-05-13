@@ -64,6 +64,38 @@ def main() -> int:
     _log("INFO", "Entering Sketch mode")
     main_window.actions["category_sketch"].trigger()
     _assert_contains(widget._hud_labels["mode"].text(), "Sketch", "Sketch mode visible")
+    sketch_start_tools = _command_action_names(main_window)
+    if "start_sketch" not in sketch_start_tools:
+        _fail("New Sketch action is not visible after entering Sketch")
+    _pass("New Sketch action is visible")
+    premature_draw_tools = {
+        "sketch_line_tool",
+        "sketch_arc_tool",
+        "sketch_circle_tool",
+        "sketch_rectangle3_tool",
+        "sketch_center_rectangle_tool",
+        "sketch_trim",
+    }.intersection(sketch_start_tools)
+    if premature_draw_tools:
+        _fail(
+            "Sketch draw tools are visible before New Sketch: "
+            f"{sorted(premature_draw_tools)}"
+        )
+    _pass("Sketch draw tools hidden until New Sketch")
+    hint_text = widget.get_ui_state().hint_text
+    _assert_contains(
+        hint_text,
+        "bottom plane",
+        "Context hint points to the default sketch plane",
+    )
+
+    _log("INFO", "Starting new sketch")
+    main_window.actions["start_sketch"].trigger()
+    _assert_contains(
+        widget._hud_labels["tool"].text(),
+        "Sketch center_rectangle",
+        "Active sketch tool visible",
+    )
     sketch_tools = _command_action_names(main_window)
     expected_tools = {
         "sketch_line_tool",
@@ -77,11 +109,11 @@ def main() -> int:
     _pass(
         "Sketch tools visible: Line, Arc, Circle, Rectangle 3 Point, Center Rectangle"
     )
-    hint = widget.findChild(QLabel, "ContextHintOverlay")
-    if hint is None or hint.isHidden():
-        _fail("Context hint is not visible after entering Sketch")
+    hint_text = widget.get_ui_state().hint_text
     _assert_contains(
-        hint.text(), "Center Rectangle", "Context hint visible for active sketch tool"
+        hint_text,
+        "Center Rectangle",
+        "Context hint visible for active sketch tool",
     )
     if not main_window.actions["sketch_center_rectangle_tool"].isChecked():
         _fail("Center Rectangle is not visibly active")
@@ -127,7 +159,9 @@ def main() -> int:
         _fail("Extrude affordance renderer missing")
     _pass("Extrude manipulator/arrow renderer exists")
     _assert_contains(
-        hint.text(), "Drag arrow", "Hint visible: Drag arrow, Enter accept, Esc cancel"
+        widget.get_ui_state().hint_text,
+        "Drag arrow",
+        "Hint visible: Drag arrow, Enter accept, Esc cancel",
     )
 
     _log("INFO", "Checking selection modes")

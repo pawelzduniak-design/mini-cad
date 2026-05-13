@@ -9,27 +9,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TEST_GROUPS = (
     (
-        "contract matrix",
+        "safety guardrails",
         [
-            "tests/test_command_contract_matrix.py",
-        ],
-    ),
-    (
-        "workflow tests",
-        [
-            "tests/test_user_workflows.py",
-        ],
-    ),
-    (
-        "random command sequences",
-        [
-            "tests/test_random_command_sequences.py",
+            "tests/safety",
         ],
     ),
     (
         "UI state contracts",
         [
-            "tests/test_ui_state_contracts.py",
+            "tests/ui",
         ],
     ),
 )

@@ -16,6 +16,7 @@ class SceneSnapshot:
     items: dict[str, SceneObject]
     active_item_id: str | None
     selection: SelectionRef | None
+    selections: tuple[SelectionRef, ...]
 
 
 class Scene:
@@ -25,6 +26,7 @@ class Scene:
         self._items: dict[str, SceneObject] = {}
         self._active_item_id: str | None = None
         self._selection: SelectionRef | None = None
+        self._selections: tuple[SelectionRef, ...] = ()
         self._undo_stack: list[SceneSnapshot] = []
         self._redo_stack: list[SceneSnapshot] = []
         self._transaction_depth = 0
@@ -78,16 +80,28 @@ class Scene:
             removed = self._items.pop(item_id)
         except KeyError as exc:
             raise KeyError(f"Unknown scene object: {item_id}") from exc
-        if self._active_item_id == item_id:
-            self._active_item_id = next(iter(self._items), None)
-        if self._selection is not None and self._selection.item_id == item_id:
-            self._selection = None
+        active_removed = self._active_item_id == item_id
+        selection_removed = (
+            self._selection is not None and self._selection.item_id == item_id
+        )
+        self._selections = tuple(
+            selection for selection in self._selections if selection.item_id != item_id
+        )
+        if selection_removed:
+            self._selection = self._selections[0] if self._selections else None
+        if active_removed:
+            self._active_item_id = (
+                self._selection.item_id
+                if self._selection is not None
+                else next(iter(self._items), None)
+            )
         return removed
 
     def clear(self) -> None:
         self._items.clear()
         self._active_item_id = None
         self._selection = None
+        self._selections = ()
         self._undo_stack.clear()
         self._redo_stack.clear()
 
@@ -101,11 +115,29 @@ class Scene:
     def selection(self) -> SelectionRef | None:
         return self._selection
 
+    def selection_refs(self) -> tuple[SelectionRef, ...]:
+        return self._selections
+
     def set_selection(self, selection: SelectionRef | None) -> None:
         if selection is not None:
             self.get(selection.item_id)
             self._active_item_id = selection.item_id
         self._selection = selection
+        self._selections = () if selection is None else (selection,)
+
+    def set_selections(self, selections: tuple[SelectionRef, ...]) -> None:
+        normalized: list[SelectionRef] = []
+        seen: set[SelectionRef] = set()
+        for selection in selections:
+            self.get(selection.item_id)
+            if selection in seen:
+                continue
+            seen.add(selection)
+            normalized.append(selection)
+        self._selections = tuple(normalized)
+        self._selection = self._selections[0] if self._selections else None
+        if self._selection is not None:
+            self._active_item_id = self._selection.item_id
 
     def can_undo(self) -> bool:
         return bool(self._undo_stack)
@@ -184,6 +216,7 @@ class Scene:
             },
             active_item_id=self._active_item_id,
             selection=self._selection,
+            selections=self._selections,
         )
 
     def _restore_snapshot(self, snapshot: SceneSnapshot) -> None:
@@ -197,3 +230,4 @@ class Scene:
         }
         self._active_item_id = snapshot.active_item_id
         self._selection = snapshot.selection
+        self._selections = snapshot.selections

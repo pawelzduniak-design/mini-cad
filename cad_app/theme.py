@@ -33,21 +33,31 @@ FACE_SELECTED = (0.18, 0.58, 1.0)
 PREVIEW_BLUE = (0.20, 0.60, 1.0)
 DIMENSION_LABEL = (0.94, 0.96, 1.0)
 SKETCH_PROFILE = (0.16, 0.70, 1.0)
+SKETCH_UNDER_DEFINED = SKETCH_PROFILE
+SKETCH_FULLY_DEFINED = (0.18, 0.78, 0.36)
 SKETCH_ENTITY = (0.50, 0.82, 1.0)
 TOOLTIP_BG = "#151b22"
 SUCCESS_GREEN = "#35c46b"
 
-SIDEBAR_WIDTH = 94
+SIDEBAR_WIDTH = 88
+CONTEXT_PANEL_WIDTH = 224
 RIGHT_PANEL_WIDTH = 320
 STATUS_BAR_HEIGHT = 30
 BORDER_RADIUS = 8
-SIDEBAR_ICON_SIZE = 40
+SIDEBAR_ICON_SIZE = 34
 CONTEXT_ICON_SIZE = 22
 TOP_ICON_SIZE = 20
 
 
 def rgb_tuple(color: tuple[float, float, float]) -> str:
     return ", ".join(f"{component:.3f}" for component in color)
+
+
+def sketch_profile_color(meta: dict[str, object] | None) -> tuple[float, float, float]:
+    state = (meta or {}).get("definition_state")
+    if state in {"fully_defined", "full"} or (meta or {}).get("fully_defined") is True:
+        return SKETCH_FULLY_DEFINED
+    return SKETCH_UNDER_DEFINED
 
 
 def app_stylesheet() -> str:
@@ -228,21 +238,24 @@ def sidebar_toolbar_stylesheet() -> str:
 def context_toolbar_stylesheet() -> str:
     return f"""
     QToolBar#CommandToolbar {{
-        background: transparent;
+        background: {TOP_BAR_BG_2};
         border: none;
-        spacing: 8px;
-        padding: 8px 12px;
+        border-left: 1px solid #26303a;
+        border-right: 1px solid #26303a;
+        spacing: 6px;
+        padding: 10px 10px;
     }}
     QToolBar#CommandToolbar QToolButton {{
         background: #202832;
         color: {TEXT_PRIMARY};
         border: 1px solid #364250;
-        border-radius: 8px;
-        padding: 7px 12px;
-        min-width: 118px;
-        max-width: 156px;
+        border-radius: 7px;
+        padding: 7px 10px;
+        min-width: {CONTEXT_PANEL_WIDTH - 34}px;
+        max-width: {CONTEXT_PANEL_WIDTH - 34}px;
         min-height: 36px;
         max-height: 40px;
+        text-align: left;
     }}
     QToolBar#CommandToolbar QToolButton:hover {{
         background: #26323f;
@@ -271,5 +284,39 @@ def overlay_stylesheet() -> str:
         border-radius: 7px;
         padding: 6px 10px;
         font-weight: 600;
+    }}
+    """
+
+
+def tool_popover_stylesheet() -> str:
+    return f"""
+    QFrame#tool_popover {{
+        background: rgba(21, 27, 34, 230);
+        color: {TEXT_PRIMARY};
+        border: 1px solid rgba(52, 64, 78, 160);
+        border-radius: 7px;
+    }}
+    QFrame#tool_popover QLabel {{
+        background: transparent;
+        border: none;
+        color: {TEXT_PRIMARY};
+        padding: 0;
+    }}
+    QFrame#tool_popover QDoubleSpinBox {{
+        background: #111820;
+        color: {TEXT_PRIMARY};
+        border: 1px solid #34404e;
+        border-radius: 5px;
+        padding: 3px 6px;
+    }}
+    QFrame#tool_popover QPushButton {{
+        background: #202a34;
+        color: {TEXT_PRIMARY};
+        border: 1px solid #34404e;
+        border-radius: 5px;
+        padding: 4px 8px;
+    }}
+    QFrame#tool_popover QPushButton:hover {{
+        border-color: {ACCENT_BLUE_HOVER};
     }}
     """
