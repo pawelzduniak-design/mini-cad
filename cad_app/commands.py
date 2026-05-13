@@ -387,6 +387,8 @@ def _thread_solid(
         fraction = index / steps
         angle = 2.0 * math.pi * turns * fraction
         axial_distance = length * fraction
+        root_before = max(0.0, axial_distance - half_pitch)
+        root_after = min(length, axial_distance + half_pitch)
         radial = _radial_direction(basis_u, basis_v, angle)
         polygon = BRepBuilderAPI_MakePolygon()
         polygon.Add(
@@ -394,7 +396,7 @@ def _thread_solid(
                 center,
                 axis,
                 radial,
-                axial_distance - half_pitch,
+                root_before,
                 root_radius,
             )
         )
@@ -412,7 +414,7 @@ def _thread_solid(
                 center,
                 axis,
                 radial,
-                axial_distance + half_pitch,
+                root_after,
                 root_radius,
             )
         )

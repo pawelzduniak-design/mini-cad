@@ -74,7 +74,7 @@ def test_thread_edge_adds_valid_modeled_thread_to_circular_edge() -> None:
         break
 
     assert edge_index is not None
-    threaded = thread_edge(shape, edge_index, pitch=3.0, length=24.0, depth=0.8)
+    threaded = thread_edge(shape, edge_index, pitch=3.0, length=30.0, depth=0.8)
 
     assert_valid_shape(threaded)
     assert count_subshapes(threaded, "solid") == 1
