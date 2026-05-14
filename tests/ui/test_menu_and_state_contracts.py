@@ -13,6 +13,11 @@ def _command_action_names(main_window) -> list[str]:
     ]
 
 
+class _FakeView:
+    def Convert(self, *_args):
+        return (120, 160)
+
+
 def test_category_rail_and_initial_context(qapp) -> None:
     from PySide6.QtWidgets import QToolBar
 
@@ -162,6 +167,102 @@ def test_hosted_sketch_profile_exposes_cut_and_subtracts_body(qapp) -> None:
         shape,
         "face",
     )
+
+
+def test_push_pull_keeps_signed_sketch_distance_and_cut_forces_negative(qapp) -> None:
+    from cad_app.types import SelectionKind
+    from cad_app.ui_sessions import MoveSession
+    from cad_app.viewer_widget_move_preview import ViewerWidgetMovePreviewMixin
+
+    session = MoveSession(
+        tool="sketch_extrude",
+        target_kind=SelectionKind.FACE,
+        item_id="profile",
+        index=1,
+        axis_name="Normal",
+        axis=(0.0, 0.0, 1.0),
+        operation="auto",
+        distance=-12.0,
+    )
+
+    assert ViewerWidgetMovePreviewMixin._sketch_extrude_session_distance(
+        session
+    ) == pytest.approx(-12.0)
+
+    session.operation = "cut"
+    session.distance = 12.0
+    assert ViewerWidgetMovePreviewMixin._sketch_extrude_session_distance(
+        session
+    ) == pytest.approx(-12.0)
+
+
+def test_push_pull_drag_fallback_maps_up_positive_and_down_negative(qapp) -> None:
+    from cad_app.main_window import create_main_window
+    from cad_app.scene import Scene
+    from cad_app.types import SelectionKind
+    from cad_app.ui_sessions import MoveSession
+    from cad_app.viewer import Viewer
+
+    widget = create_main_window(Viewer(), Scene()).viewer_widget
+    widget._move_session = MoveSession(
+        tool="sketch_extrude",
+        target_kind=SelectionKind.FACE,
+        item_id="profile",
+        index=1,
+        axis_name="Normal",
+        axis=(0.0, 0.0, 1.0),
+    )
+    widget._update_move_preview = lambda: None
+    widget._update_extrude_affordance = lambda: None
+    widget._show_dimension_overlay = lambda *_args, **_kwargs: None
+
+    widget._begin_move_drag(100, 100)
+    widget._drag_move_to(100, 80)
+    assert widget._move_session.distance > 0
+
+    widget._move_session.distance = 0.0
+    widget._begin_move_drag(100, 100)
+    widget._drag_move_to(100, 120)
+    assert widget._move_session.distance < 0
+
+
+def test_view_gizmo_click_does_not_reset_active_push_pull_session(qapp) -> None:
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+
+    from cad_app.main_window import create_main_window
+    from cad_app.scene import Scene
+    from cad_app.types import SelectionKind
+    from cad_app.ui_sessions import MoveSession
+    from cad_app.viewer import Viewer
+
+    widget = create_main_window(Viewer(), Scene()).viewer_widget
+    session = MoveSession(
+        tool="sketch_extrude",
+        target_kind=SelectionKind.FACE,
+        item_id="profile",
+        index=1,
+        axis_name="Normal",
+        axis=(0.0, 0.0, 1.0),
+        operation="auto",
+        distance=-7.0,
+    )
+    widget._move_session = session
+    widget._update_move_preview = lambda: None
+    widget._update_extrude_affordance = lambda: None
+    widget._show_dimension_overlay = lambda *_args, **_kwargs: None
+
+    left, top, _size = widget._orientation_gizmo_rect()
+    point = QPoint(left + 78, top + 18)
+
+    QTest.mousePress(widget, Qt.LeftButton, Qt.NoModifier, point)
+    QTest.mouseRelease(widget, Qt.LeftButton, Qt.NoModifier, point)
+
+    assert widget._move_session is session
+    assert session.axis_name == "Normal"
+    assert session.axis == (0.0, 0.0, 1.0)
+    assert session.operation == "auto"
+    assert session.distance == pytest.approx(-7.0)
 
 
 def test_push_pull_face_accepts_signed_distance(qapp) -> None:
@@ -375,6 +476,208 @@ def test_selected_box_edge_can_be_measured_and_resized(qapp) -> None:
     assert depth == pytest.approx(50.0)
     assert height == pytest.approx(80.0)
     assert scene.get(item_id).meta["height"] == 80.0
+
+
+def test_edge_inline_editor_uses_down_right_offset(qapp, monkeypatch) -> None:
+    require_ocp()
+
+    from PySide6.QtCore import QPoint
+
+    from cad_app.engine import make_box
+    from cad_app.main_window import create_main_window
+    from cad_app.measurement import edge_measurement
+    from cad_app.picker import Picker
+    from cad_app.scene import Scene
+    from cad_app.types import SelectionKind, SelectionRef
+    from cad_app.viewer import Viewer
+
+    scene = Scene()
+    item_id = scene.add_shape(
+        make_box(60.0, 50.0, 45.0),
+        meta={"kind": "body", "source": "primitive_box"},
+    )
+    picker = Picker(scene)
+    edge_index = 1
+    measurement = edge_measurement(
+        picker.subshape(item_id, SelectionKind.EDGE, edge_index)
+    )
+    while measurement.axis_name is None:
+        edge_index += 1
+        measurement = edge_measurement(
+            picker.subshape(item_id, SelectionKind.EDGE, edge_index)
+        )
+    selection = SelectionRef(item_id, SelectionKind.EDGE, edge_index)
+    scene.set_selection(selection)
+    widget = create_main_window(Viewer(), scene).viewer_widget
+    widget.resize(500, 400)
+    monkeypatch.setattr(widget._viewer, "is_initialized", True)
+    monkeypatch.setattr(widget._viewer, "_view", _FakeView())
+
+    widget._show_edge_dimension_editor(selection, measurement)
+
+    assert not widget._edge_dimension_editor.isHidden()
+    assert widget._inline_dimension_editor_specs["edge"]["offset"] == (28, 14)
+    scale = widget.devicePixelRatioF() or 1.0
+    expected_x = int(round(120 / scale)) + 28
+    expected_y = int(round(160 / scale)) + 14
+    max_x = max(0, widget.width() - widget._edge_dimension_editor.width() - 8)
+    max_y = max(0, widget.height() - widget._edge_dimension_editor.height() - 8)
+    assert widget._edge_dimension_editor.pos() == widget.mapToGlobal(
+        QPoint(min(expected_x, max_x), min(expected_y, max_y))
+    )
+    widget._hide_inline_dimension_editors()
+
+
+def test_box_inline_dimension_editors_update_body_dimensions(qapp, monkeypatch) -> None:
+    require_ocp()
+
+    from cad_app.engine import make_box
+    from cad_app.main_window import create_main_window
+    from cad_app.measurement import axis_aligned_box_dimensions
+    from cad_app.scene import Scene
+    from cad_app.types import SelectionKind, SelectionRef
+    from cad_app.viewer import Viewer
+
+    scene = Scene()
+    item_id = scene.add_shape(
+        make_box(60.0, 50.0, 45.0),
+        meta={"kind": "body", "source": "primitive_box"},
+    )
+    selection = SelectionRef(item_id, SelectionKind.FACE, 1)
+    scene.set_selection(selection)
+    widget = create_main_window(Viewer(), scene).viewer_widget
+    monkeypatch.setattr(widget._viewer, "is_initialized", True)
+    monkeypatch.setattr(widget._viewer, "_view", _FakeView())
+    monkeypatch.setattr(
+        widget._viewer, "display_dimension_labels", lambda _labels: None
+    )
+    monkeypatch.setattr(widget._viewer, "display_scene", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        widget._viewer,
+        "display_selection_marker",
+        lambda *_args, **_kwargs: None,
+    )
+
+    widget._show_selected_box_dimensions()
+    assert not widget._inline_dimension_editors["box_width"].isHidden()
+    assert not widget._inline_dimension_editors["box_depth"].isHidden()
+    assert not widget._inline_dimension_editors["box_height"].isHidden()
+
+    widget._inline_dimension_editors["box_height"].setValue(90.0)
+    widget._commit_inline_dimension_editor("box_height")
+
+    _width, _depth, height, _anchor = axis_aligned_box_dimensions(
+        scene.get(item_id).shape
+    )
+    assert height == pytest.approx(90.0)
+    assert scene.get(item_id).meta["height"] == 90.0
+
+
+def test_sketch_inline_dimension_editors_update_rectangle_and_circle(
+    qapp,
+    monkeypatch,
+) -> None:
+    require_ocp()
+
+    from cad_app.main_window import create_main_window
+    from cad_app.scene import Scene
+    from cad_app.sketch import (
+        SKETCH_META_KIND,
+        make_center_rectangle_profile,
+        make_circle_profile_at,
+    )
+    from cad_app.types import SelectionKind, SelectionRef
+    from cad_app.viewer import Viewer
+    from cad_app.workplane import Workplane
+
+    workplane = Workplane.world_xy()
+    frame_meta = {
+        "workplane": "XY",
+        "workplane_origin": (0.0, 0.0, 0.0),
+        "workplane_x_direction": (1.0, 0.0, 0.0),
+        "workplane_y_direction": (0.0, 1.0, 0.0),
+        "center_u": 0.0,
+        "center_v": 0.0,
+    }
+    scene = Scene()
+    rectangle_id = scene.add_shape(
+        make_center_rectangle_profile(workplane, (0.0, 0.0), (10.0, 5.0)),
+        meta={
+            "kind": SKETCH_META_KIND,
+            "profile": "center_rectangle",
+            "width": 20.0,
+            "height": 10.0,
+            **frame_meta,
+        },
+    )
+    circle_id = scene.add_shape(
+        make_circle_profile_at(workplane, (50.0, 0.0), 8.0),
+        meta={
+            "kind": SKETCH_META_KIND,
+            "profile": "circle",
+            "radius": 8.0,
+            "center_u": 50.0,
+            "center_v": 0.0,
+            **{
+                key: value
+                for key, value in frame_meta.items()
+                if key.startswith("workplane")
+            },
+        },
+    )
+    widget = create_main_window(Viewer(), scene).viewer_widget
+    monkeypatch.setattr(widget._viewer, "is_initialized", True)
+    monkeypatch.setattr(widget._viewer, "_view", _FakeView())
+    monkeypatch.setattr(
+        widget._viewer, "display_dimension_labels", lambda _labels: None
+    )
+    monkeypatch.setattr(widget._viewer, "display_scene", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        widget._viewer,
+        "display_selection_marker",
+        lambda *_args, **_kwargs: None,
+    )
+
+    scene.set_selection(SelectionRef(rectangle_id, SelectionKind.FACE, 1))
+    widget._show_selected_sketch_dimensions()
+    assert not widget._inline_dimension_editors["sketch_width"].isHidden()
+    assert not widget._inline_dimension_editors["sketch_height"].isHidden()
+    widget._inline_dimension_editors["sketch_width"].setValue(44.0)
+    widget._commit_inline_dimension_editor("sketch_width")
+    assert scene.get(rectangle_id).meta["width"] == pytest.approx(44.0)
+
+    scene.set_selection(SelectionRef(circle_id, SelectionKind.FACE, 1))
+    widget._show_selected_sketch_dimensions()
+    assert not widget._inline_dimension_editors["sketch_radius"].isHidden()
+    widget._inline_dimension_editors["sketch_radius"].setValue(14.0)
+    widget._commit_inline_dimension_editor("sketch_radius")
+    assert scene.get(circle_id).meta["radius"] == pytest.approx(14.0)
+
+
+def test_nonparametric_face_hides_inline_dimension_editors(qapp, monkeypatch) -> None:
+    require_ocp()
+
+    from cad_app.engine import make_box
+    from cad_app.main_window import create_main_window
+    from cad_app.scene import Scene
+    from cad_app.types import SelectionKind, SelectionRef
+    from cad_app.viewer import Viewer
+
+    scene = Scene()
+    item_id = scene.add_shape(
+        make_box(60.0, 50.0, 45.0),
+        meta={"kind": "body", "source": "imported"},
+    )
+    scene.set_selection(SelectionRef(item_id, SelectionKind.FACE, 1))
+    widget = create_main_window(Viewer(), scene).viewer_widget
+    monkeypatch.setattr(widget._viewer, "is_initialized", True)
+    monkeypatch.setattr(widget._viewer, "_view", _FakeView())
+
+    widget._show_selected_box_dimensions()
+
+    assert all(
+        editor.isHidden() for editor in widget._inline_dimension_editors.values()
+    )
 
 
 def test_sketch_extruded_box_dimensions_are_editable_from_face(qapp) -> None:

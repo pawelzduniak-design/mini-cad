@@ -227,8 +227,6 @@ class ViewerWidgetMovePreviewMixin:
     def _sketch_extrude_session_distance(session: MoveSession) -> float:
         if session.operation == "cut":
             return -abs(session.distance)
-        if session.operation in {"auto", "join"} and session.distance < 0:
-            return abs(session.distance)
         return session.distance
 
     @staticmethod

@@ -24,6 +24,18 @@ if TYPE_CHECKING:
     from OCP.TopoDS import TopoDS_Shape
 
 
+def selection_marker_color_for_meta(
+    meta: dict[str, object] | None,
+) -> tuple[float, float, float]:
+    if (meta or {}).get("kind") == "sketch_profile":
+        return theme.SKETCH_PROFILE_SELECTED
+    return theme.FACE_SELECTED
+
+
+def sketch_preview_marker_color() -> tuple[float, float, float]:
+    return theme.SKETCH_PREVIEW
+
+
 class ViewerMarkerMixin:
     def clear_selection_marker(self, redraw: bool = True) -> None:
         if not self.is_initialized:
@@ -157,9 +169,7 @@ class ViewerMarkerMixin:
         object_kind = (meta or {}).get("kind")
         if object_kind == "sketch_entity":
             return
-        marker_color = theme.FACE_SELECTED
-        if object_kind == "sketch_profile":
-            marker_color = theme.PREVIEW_BLUE
+        marker_color = selection_marker_color_for_meta(meta)
         marker_shape = self._display_shape_for_meta(shape, meta or {})
         wireframe_marker = self._prefers_wireframe_marker(marker_shape)
         return self._display_marker(
@@ -246,7 +256,7 @@ class ViewerMarkerMixin:
         edge_shape = edge_compound(preview_shape)
         self._preview_marker = self._display_marker(
             edge_shape if edge_shape is not None else preview_shape,
-            Quantity_Color(*theme.SKETCH_PROFILE, Quantity_TOC_RGB),
+            Quantity_Color(*sketch_preview_marker_color(), Quantity_TOC_RGB),
             width=5.5,
             wireframe=True,
             topmost=True,

@@ -215,6 +215,7 @@ class ViewerWidgetEventMixin:
                     axis, positive, label = view_target
                     self._navigation.view_axis(axis, positive=positive)
                     self._navigation.capture_home()
+                    self._refresh_overlays_after_camera_change()
                     self._show_status(f"View: {label}")
             self._orientation_gizmo_press = None
             self._orientation_gizmo_dragging = False
@@ -261,6 +262,19 @@ class ViewerWidgetEventMixin:
         )
         self._position_edge_dimension_editor()
         event.accept()
+
+    def _refresh_overlays_after_camera_change(self) -> None:
+        self._position_edge_dimension_editor()
+        self._position_move_manipulator_overlay()
+        if self._move_session is not None:
+            self._update_extrude_affordance()
+            self._update_move_preview()
+            self._show_dimension_overlay(
+                self._move_overlay_label(self._move_session),
+                self.width() // 2,
+                self.height() // 2,
+            )
+        self._refresh_hud()
 
     def keyPressEvent(self, event) -> None:
         if self._selection_drag_start is not None:

@@ -121,32 +121,13 @@ class ViewerWidget(
         self._dimension_overlay.setObjectName("DimensionOverlay")
         self._dimension_overlay.setStyleSheet(theme.overlay_stylesheet())
         self._dimension_overlay.hide()
-        self._edge_dimension_editor = QDoubleSpinBox(self)
-        self._edge_dimension_editor.setObjectName("EdgeDimensionEditor")
-        self._edge_dimension_editor.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint)
-        self._edge_dimension_editor.setAttribute(Qt.WA_ShowWithoutActivating)
-        self._edge_dimension_editor.setFocusPolicy(Qt.ClickFocus)
-        self._edge_dimension_editor.setKeyboardTracking(False)
-        self._edge_dimension_editor.setDecimals(2)
-        self._edge_dimension_editor.setRange(0.001, 1_000_000.0)
-        self._edge_dimension_editor.setSuffix(" mm")
-        self._edge_dimension_editor.setFixedWidth(118)
-        self._edge_dimension_editor.setStyleSheet(f"""
-            QDoubleSpinBox#EdgeDimensionEditor {{
-                background: rgba(21, 27, 34, 238);
-                color: {theme.TEXT_PRIMARY};
-                border: 1px solid rgba(74, 90, 108, 210);
-                border-radius: 6px;
-                padding: 4px 7px;
-                font-weight: 700;
-            }}
-            """)
-        self._edge_dimension_editor.hide()
+        self._inline_dimension_editors: dict[str, QDoubleSpinBox] = {}
+        self._inline_dimension_editor_specs: dict[str, dict[str, Any]] = {}
+        self._inline_dimension_editor_updating = False
+        self._build_inline_dimension_editors()
+        self._edge_dimension_editor = self._inline_dimension_editors["edge"]
         self._edge_dimension_editor_selection = None
         self._edge_dimension_editor_updating = False
-        self._edge_dimension_editor.editingFinished.connect(
-            self._commit_edge_dimension_editor
-        )
         self._context_hint_overlay = QLabel(self)
         self._context_hint_overlay.setObjectName("ContextHintOverlay")
         self._context_hint_overlay.setStyleSheet(theme.overlay_stylesheet())
@@ -179,6 +160,53 @@ class ViewerWidget(
         self.setAttribute(Qt.WA_NativeWindow)
         self.setAttribute(Qt.WA_PaintOnScreen)
         self.setFocusPolicy(Qt.StrongFocus)
+
+    def _build_inline_dimension_editors(self) -> None:
+        editor_style = f"""
+            QDoubleSpinBox {{
+                background: rgba(21, 27, 34, 238);
+                color: {theme.TEXT_PRIMARY};
+                border: 1px solid rgba(74, 90, 108, 210);
+                border-radius: 6px;
+                padding: 4px 7px;
+                font-weight: 700;
+            }}
+            """
+        for key, label, width in (
+            ("edge", "", 118),
+            ("box_width", "W", 108),
+            ("box_depth", "D", 108),
+            ("box_height", "H", 108),
+            ("sketch_width", "W", 108),
+            ("sketch_height", "H", 108),
+            ("sketch_radius", "R", 108),
+            ("sketch_inner_radius", "Inner R", 138),
+        ):
+            editor = QDoubleSpinBox(self)
+            object_name = (
+                "EdgeDimensionEditor"
+                if key == "edge"
+                else f"InlineDimensionEditor_{key}"
+            )
+            editor.setObjectName(object_name)
+            editor.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint)
+            editor.setAttribute(Qt.WA_ShowWithoutActivating)
+            editor.setFocusPolicy(Qt.ClickFocus)
+            editor.setKeyboardTracking(False)
+            editor.setDecimals(2)
+            editor.setRange(0.001, 1_000_000.0)
+            editor.setSuffix(" mm")
+            if label:
+                editor.setPrefix(f"{label} ")
+            editor.setFixedWidth(width)
+            editor.setStyleSheet(editor_style)
+            editor.hide()
+            editor.editingFinished.connect(
+                lambda dimension_key=key: self._commit_inline_dimension_editor(
+                    dimension_key
+                )
+            )
+            self._inline_dimension_editors[key] = editor
 
     def attach_hud(self, labels: dict[str, QLabel]) -> None:
         self._hud_labels = labels
@@ -331,6 +359,12 @@ class ViewerWidget(
     def _tool_popover_summary_text(session: MoveSession) -> str:
         if session.tool in {"extrude", "sketch_extrude"}:
             operation = "cut" if session.operation == "cut" else "push/pull"
+            if (
+                session.tool == "sketch_extrude"
+                and session.operation == "auto"
+                and session.distance < 0
+            ):
+                operation = "auto cut"
             return (
                 f"Direction: {session.axis_name}; "
                 f"{operation} {abs(session.distance):.2f} mm"
@@ -408,8 +442,9 @@ class ViewerWidget(
             self._move_session.distance = -abs(self._move_session.distance or 10.0)
             self._set_context_hint("Push/Pull will subtract from the host body")
         else:
-            self._move_session.distance = abs(self._move_session.distance)
-            self._set_context_hint("Push/Pull will add material from the host sketch")
+            self._set_context_hint(
+                "Push/Pull auto: outward adds, inward subtracts from the host"
+            )
         self._update_tool_parameter_preview()
 
     def _update_tool_parameter_preview(self) -> None:

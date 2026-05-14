@@ -25,7 +25,7 @@ from cad_app.measurement import (
     axis_aligned_box_dimensions,
     edge_measurement,
 )
-from cad_app.sketch import is_sketch_object
+from cad_app.sketch import is_sketch_object, is_sketch_profile
 from cad_app.thread_specs import (
     THREAD_MODES,
     THREAD_TYPES,
@@ -374,51 +374,316 @@ class ViewerWidgetCommandsMixin:
         selection: SelectionRef,
         measurement: EdgeMeasurement,
     ) -> None:
-        if not hasattr(self, "_edge_dimension_editor"):
+        if not hasattr(self, "_inline_dimension_editors"):
             return
         if not self._viewer.is_initialized or not self._selected_edge_length_editable():
             self._hide_edge_dimension_editor()
             return
         self._edge_dimension_editor_selection = selection
-        self._edge_dimension_editor_updating = True
-        self._edge_dimension_editor.setValue(measurement.length)
-        self._edge_dimension_editor_updating = False
-        self._position_edge_dimension_editor(measurement)
-        self._edge_dimension_editor.show()
-        self._edge_dimension_editor.raise_()
+        self._show_inline_dimension_editors(
+            [
+                {
+                    "key": "edge",
+                    "type": "edge",
+                    "label": measurement.axis_name or "L",
+                    "value": measurement.length,
+                    "position": measurement.midpoint,
+                    "selection": selection,
+                    "offset": (28, 14),
+                }
+            ]
+        )
 
     def _hide_edge_dimension_editor(self) -> None:
-        if not hasattr(self, "_edge_dimension_editor"):
-            return
-        self._edge_dimension_editor_updating = True
-        self._edge_dimension_editor.hide()
-        self._edge_dimension_editor_selection = None
-        self._edge_dimension_editor_updating = False
+        self._hide_inline_dimension_editors()
 
     def _position_edge_dimension_editor(
         self,
         measurement: EdgeMeasurement | None = None,
     ) -> None:
-        if (
-            not hasattr(self, "_edge_dimension_editor")
-            or self._edge_dimension_editor.isHidden()
-            or not self._viewer.is_initialized
-        ):
+        if not hasattr(self, "_inline_dimension_editors"):
             return
         if measurement is None:
             measurement = self._selected_edge_measurement()
-        if measurement is None:
-            self._hide_edge_dimension_editor()
+        if measurement is not None and "edge" in self._inline_dimension_editor_specs:
+            self._inline_dimension_editor_specs["edge"] = {
+                **self._inline_dimension_editor_specs["edge"],
+                "value": measurement.length,
+                "position": measurement.midpoint,
+            }
+        self._position_inline_dimension_editors()
+
+    def _show_inline_dimension_editors(self, specs: list[dict[str, object]]) -> None:
+        if not hasattr(self, "_inline_dimension_editors"):
             return
-        view_x, view_y = self._viewer.view.Convert(*measurement.midpoint)
-        scale = self.devicePixelRatioF()
-        x = int(round(view_x / scale)) + 12
-        y = int(round(view_y / scale)) - 18
-        max_x = max(0, self.width() - self._edge_dimension_editor.width() - 8)
-        max_y = max(0, self.height() - self._edge_dimension_editor.height() - 8)
+        if not specs or not self._viewer.is_initialized:
+            self._hide_inline_dimension_editors()
+            return
+        self._inline_dimension_editor_updating = True
+        self._edge_dimension_editor_updating = True
+        self._inline_dimension_editor_specs = {}
+        visible_keys: set[str] = set()
+        for spec in specs:
+            key = str(spec.get("key", ""))
+            editor = self._inline_dimension_editors.get(key)
+            if editor is None:
+                continue
+            label = str(spec.get("label", ""))
+            editor.setPrefix(f"{label} " if label else "")
+            editor.setValue(float(spec.get("value", 0.0)))
+            editor.setToolTip(str(spec.get("tooltip", "Edit dimension")))
+            editor.show()
+            editor.raise_()
+            self._inline_dimension_editor_specs[key] = dict(spec)
+            visible_keys.add(key)
+        for key, editor in self._inline_dimension_editors.items():
+            if key not in visible_keys:
+                editor.hide()
+        self._edge_dimension_editor_updating = False
+        self._inline_dimension_editor_updating = False
+        self._position_inline_dimension_editors()
+
+    def _hide_inline_dimension_editors(self) -> None:
+        if not hasattr(self, "_inline_dimension_editors"):
+            return
+        self._inline_dimension_editor_updating = True
+        self._edge_dimension_editor_updating = True
+        for editor in self._inline_dimension_editors.values():
+            editor.hide()
+        self._inline_dimension_editor_specs = {}
+        self._edge_dimension_editor_selection = None
+        self._edge_dimension_editor_updating = False
+        self._inline_dimension_editor_updating = False
+
+    def _position_inline_dimension_editors(self) -> None:
+        if not hasattr(self, "_inline_dimension_editors"):
+            return
+        if not self._viewer.is_initialized:
+            return
+        for key in tuple(self._inline_dimension_editor_specs):
+            self._position_inline_dimension_editor(key)
+
+    def _position_inline_dimension_editor(self, key: str) -> None:
+        editor = self._inline_dimension_editors.get(key)
+        spec = self._inline_dimension_editor_specs.get(key)
+        if editor is None or spec is None or editor.isHidden():
+            return
+        position = spec.get("position")
+        if not isinstance(position, tuple) or len(position) != 3:
+            return
+        view_x, view_y = self._viewer.view.Convert(*position)
+        scale = self.devicePixelRatioF() or 1.0
+        offset = spec.get("offset", (14, 14))
+        if not isinstance(offset, tuple) or len(offset) != 2:
+            offset = (14, 14)
+        x = int(round(view_x / scale)) + int(offset[0])
+        y = int(round(view_y / scale)) + int(offset[1])
+        max_x = max(0, self.width() - editor.width() - 8)
+        max_y = max(0, self.height() - editor.height() - 8)
         x = min(max(8, x), max_x)
         y = min(max(8, y), max_y)
-        self._edge_dimension_editor.move(self.mapToGlobal(QPoint(x, y)))
+        editor.move(self.mapToGlobal(QPoint(x, y)))
+
+    def _commit_inline_dimension_editor(self, key: str) -> None:
+        if (
+            not hasattr(self, "_inline_dimension_editors")
+            or self._inline_dimension_editor_updating
+        ):
+            return
+        spec = self._inline_dimension_editor_specs.get(key)
+        if spec is None:
+            return
+        spec_type = spec.get("type")
+        if spec_type == "edge":
+            self._commit_edge_dimension_editor()
+            return
+        if spec_type == "box":
+            self._commit_box_dimension_editors(spec)
+            return
+        if spec_type == "sketch":
+            self._commit_sketch_dimension_editors(spec)
+
+    def _commit_box_dimension_editors(self, spec: dict[str, object]) -> None:
+        item_id = spec.get("item_id")
+        if not isinstance(item_id, str) or not self._box_dimensions_editable(item_id):
+            self._hide_inline_dimension_editors()
+            return
+        current_selection = self._scene.selection()
+        if current_selection is not None and current_selection.item_id != item_id:
+            self._hide_inline_dimension_editors()
+            return
+        old_width, old_depth, old_height, _anchor = axis_aligned_box_dimensions(
+            self._scene.get(item_id).shape
+        )
+        width = (
+            float(self._inline_dimension_editors["box_width"].value())
+            if "box_width" in self._inline_dimension_editor_specs
+            else old_width
+        )
+        depth = (
+            float(self._inline_dimension_editors["box_depth"].value())
+            if "box_depth" in self._inline_dimension_editor_specs
+            else old_depth
+        )
+        height = (
+            float(self._inline_dimension_editors["box_height"].value())
+            if "box_height" in self._inline_dimension_editor_specs
+            else old_height
+        )
+        try:
+            self._resize_box_dimensions(
+                item_id,
+                width,
+                depth,
+                height,
+                current_selection,
+            )
+        except (CommandError, IndexError, RuntimeError, ValueError) as exc:
+            LOGGER.warning("Inline box dimension edit failed: %s", exc, exc_info=True)
+            self._show_status("Edit Dimensions failed")
+            return
+        self._show_status(
+            f"Box dimensions set to {width:.2f} x {depth:.2f} x {height:.2f} mm"
+        )
+        self._set_context_hint("Box dimensions updated")
+        self._refresh_hud()
+
+    def _commit_sketch_dimension_editors(self, spec: dict[str, object]) -> None:
+        item_id = spec.get("item_id")
+        selection = self._scene.selection()
+        if (
+            not isinstance(item_id, str)
+            or selection is None
+            or selection.item_id != item_id
+            or not is_sketch_profile(self._scene.get(item_id).meta)
+        ):
+            self._hide_inline_dimension_editors()
+            return
+        meta = self._scene.get(item_id).meta
+        width = (
+            float(self._inline_dimension_editors["sketch_width"].value())
+            if "sketch_width" in self._inline_dimension_editor_specs
+            else self._sketch_meta_float(meta, "width")
+        )
+        height = (
+            float(self._inline_dimension_editors["sketch_height"].value())
+            if "sketch_height" in self._inline_dimension_editor_specs
+            else self._sketch_meta_float(meta, "height")
+        )
+        radius = (
+            float(self._inline_dimension_editors["sketch_radius"].value())
+            if "sketch_radius" in self._inline_dimension_editor_specs
+            else self._sketch_meta_float(meta, "radius")
+        )
+        inner_radius = (
+            float(self._inline_dimension_editors["sketch_inner_radius"].value())
+            if "sketch_inner_radius" in self._inline_dimension_editor_specs
+            else self._sketch_meta_float(meta, "inner_circle_radius")
+        )
+        self._resize_selected_sketch_profile(
+            width=width,
+            height=height,
+            radius=radius,
+            inner_circle_radius=inner_radius,
+        )
+
+    def _show_selected_sketch_dimension_editors(
+        self,
+        meta: dict[str, object],
+    ) -> None:
+        if not hasattr(self, "_inline_dimension_editors"):
+            return
+        selection = self._scene.selection()
+        if (
+            selection is None
+            or not self._viewer.is_initialized
+            or not is_sketch_profile(self._scene.get(selection.item_id).meta)
+        ):
+            self._hide_inline_dimension_editors()
+            return
+        workplane = self._workplane_from_sketch_meta(meta)
+        center_u = self._sketch_meta_float(meta, "center_u") or 0.0
+        center_v = self._sketch_meta_float(meta, "center_v") or 0.0
+        width = self._sketch_meta_float(meta, "width")
+        height = self._sketch_meta_float(meta, "height")
+        radius = self._sketch_meta_float(meta, "radius")
+        inner_radius = self._sketch_meta_float(meta, "inner_circle_radius")
+        specs: list[dict[str, object]] = []
+        if width is not None and height is not None:
+            specs.extend(
+                [
+                    {
+                        "key": "sketch_width",
+                        "type": "sketch",
+                        "label": "W",
+                        "value": width,
+                        "position": self._offset_workplane_point(
+                            workplane,
+                            (center_u, center_v + height / 2.0 + 6.0),
+                        ),
+                        "item_id": selection.item_id,
+                        "selection": selection,
+                        "offset": (14, 14),
+                        "tooltip": "Edit sketch width",
+                    },
+                    {
+                        "key": "sketch_height",
+                        "type": "sketch",
+                        "label": "H",
+                        "value": height,
+                        "position": self._offset_workplane_point(
+                            workplane,
+                            (center_u + width / 2.0 + 6.0, center_v),
+                        ),
+                        "item_id": selection.item_id,
+                        "selection": selection,
+                        "offset": (14, 14),
+                        "tooltip": "Edit sketch height",
+                    },
+                ]
+            )
+        if radius is not None:
+            specs.append(
+                {
+                    "key": "sketch_radius",
+                    "type": "sketch",
+                    "label": "R",
+                    "value": radius,
+                    "position": self._offset_workplane_point(
+                        workplane,
+                        (center_u + radius + 6.0, center_v),
+                    ),
+                    "item_id": selection.item_id,
+                    "selection": selection,
+                    "offset": (14, 14),
+                    "tooltip": "Edit sketch radius",
+                }
+            )
+        if inner_radius is not None:
+            circle_u = self._sketch_meta_float(meta, "inner_circle_center_u")
+            circle_v = self._sketch_meta_float(meta, "inner_circle_center_v")
+            specs.append(
+                {
+                    "key": "sketch_inner_radius",
+                    "type": "sketch",
+                    "label": "Inner R",
+                    "value": inner_radius,
+                    "position": self._offset_workplane_point(
+                        workplane,
+                        (
+                            (circle_u if circle_u is not None else center_u)
+                            + inner_radius
+                            + 6.0,
+                            circle_v if circle_v is not None else center_v,
+                        ),
+                    ),
+                    "item_id": selection.item_id,
+                    "selection": selection,
+                    "offset": (14, 14),
+                    "tooltip": "Edit inner radius",
+                }
+            )
+        self._show_inline_dimension_editors(specs)
 
     def _commit_edge_dimension_editor(self) -> None:
         if (
@@ -486,17 +751,39 @@ class ViewerWidgetCommandsMixin:
     def _show_selected_box_dimensions(self) -> None:
         selection = self._scene.selection()
         if selection is None or not self._viewer.is_initialized:
+            self._hide_inline_dimension_editors()
             return
         if not self._box_dimensions_editable(selection.item_id):
+            self._hide_inline_dimension_editors()
             return
         labels = self._box_dimension_labels(selection.item_id)
         if labels:
             self._viewer.display_dimension_labels(labels)
+            self._show_inline_dimension_editors(
+                [
+                    {
+                        **spec,
+                        "type": "box",
+                        "item_id": selection.item_id,
+                        "selection": selection,
+                    }
+                    for spec in self._box_dimension_specs(selection.item_id)
+                ]
+            )
 
     def _box_dimension_labels(
         self,
         item_id: str,
     ) -> list[tuple[str, tuple[float, float, float]]]:
+        return [
+            (str(spec["text"]), spec["position"])
+            for spec in self._box_dimension_specs(item_id)
+        ]
+
+    def _box_dimension_specs(
+        self,
+        item_id: str,
+    ) -> list[dict[str, object]]:
         item = self._scene.get(item_id)
         width, depth, height, _anchor = axis_aligned_box_dimensions(item.shape)
         from OCP.Bnd import Bnd_Box
@@ -510,9 +797,33 @@ class ViewerWidgetCommandsMixin:
         center_z = (z_min + z_max) * 0.5
         margin = max(width, depth, height) * 0.08 + 4.0
         return [
-            (f"W {width:.2f} mm", (center_x, y_min - margin, z_min)),
-            (f"D {depth:.2f} mm", (x_max + margin, center_y, z_min)),
-            (f"H {height:.2f} mm", (x_max + margin, y_max, center_z)),
+            {
+                "key": "box_width",
+                "label": "W",
+                "value": width,
+                "text": f"W {width:.2f} mm",
+                "position": (center_x, y_min - margin, z_min),
+                "offset": (14, 14),
+                "tooltip": "Edit width",
+            },
+            {
+                "key": "box_depth",
+                "label": "D",
+                "value": depth,
+                "text": f"D {depth:.2f} mm",
+                "position": (x_max + margin, center_y, z_min),
+                "offset": (14, 14),
+                "tooltip": "Edit depth",
+            },
+            {
+                "key": "box_height",
+                "label": "H",
+                "value": height,
+                "text": f"H {height:.2f} mm",
+                "position": (x_max + margin, y_max, center_z),
+                "offset": (14, 14),
+                "tooltip": "Edit height",
+            },
         ]
 
     def _edit_selected_edge_length(self) -> None:

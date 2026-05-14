@@ -136,14 +136,19 @@ class ViewerWidgetSketchDimensionUIMixin(ViewerWidgetSketchDimensionResizeMixin)
         selection = self._scene.selection()
         if selection is None:
             self._viewer.clear_dimension_label()
+            self._hide_inline_dimension_editors()
             return
         item = self._scene.get(selection.item_id)
         if not is_sketch_profile(item.meta):
             self._viewer.clear_dimension_label()
+            self._hide_inline_dimension_editors()
             return
         labels = self._sketch_dimension_labels(item.meta)
         if labels:
             self._viewer.display_dimension_labels(labels)
+            self._show_selected_sketch_dimension_editors(item.meta)
+        else:
+            self._hide_inline_dimension_editors()
 
     def _sketch_dimension_labels(
         self,
