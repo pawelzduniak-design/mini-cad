@@ -437,7 +437,10 @@ class ViewerWidgetSketchOperationsMixin(
             self._show_status("Planar face required")
             return
         self._active_workplane_label = f"face {face_index }"
-        self._active_workplane_host = None
+        if is_sketch_profile(self._scene.get(item_id).meta):
+            self._active_workplane_host = None
+        else:
+            self._active_workplane_host = (item_id, face_index)
         self._show_status(f"Sketch workplane: face {face_index }")
         LOGGER.info(
             "Sketch workplane set from face item_id=%s face=%d",
@@ -574,6 +577,26 @@ class ViewerWidgetSketchOperationsMixin(
         self._refresh_hud()
         return item_id
 
+    def _toggle_sketch_cut_mode(self) -> None:
+        action = self._actions.get("sketch_cut_mode")
+        checked = bool(action.isChecked()) if action is not None else False
+        if checked and not self._selected_sketch_profile_has_host():
+            if action is not None:
+                action.setChecked(False)
+            self._sketch_extrude_operation = "add"
+            self._show_status("Cut requires a sketch on a body face")
+            self._set_context_hint("Start a sketch from a selected body face first")
+            self._refresh_action_state()
+            return
+        self._sketch_extrude_operation = "cut" if checked else "add"
+        if checked:
+            self._show_status("Extrude mode: Cut")
+            self._set_context_hint("Extrude Sketch will subtract from the host body")
+        else:
+            self._show_status("Extrude mode: Add")
+            self._set_context_hint("Extrude Sketch will add material")
+        self._refresh_action_state()
+
     def _begin_sketch_extrude_tool(self) -> None:
         self._begin_sketch_profile_extrude_tool("auto")
 
@@ -582,6 +605,9 @@ class ViewerWidgetSketchOperationsMixin(
 
     def _begin_sketch_profile_extrude_tool(self, operation: str) -> None:
         if len(self._scene.selection_refs()) > 1:
+            if operation == "cut":
+                self._show_status("Cut supports one hosted sketch profile")
+                return
             if not self._selected_sketch_profile_item_ids():
                 self._show_status("Select sketch profiles first")
                 return
@@ -598,6 +624,10 @@ class ViewerWidgetSketchOperationsMixin(
                 "Sketch extrude ignored for non-sketch item_id=%s",
                 selection.item_id,
             )
+            return
+        if operation == "cut" and not self._selected_sketch_profile_has_host():
+            self._show_status("Cut requires a sketch on a body face")
+            self._set_context_hint("Start a sketch from a selected body face first")
             return
         if selection.kind == SelectionKind.OBJECT:
             self._scene.set_selection(

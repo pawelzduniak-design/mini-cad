@@ -19,22 +19,22 @@ CATEGORY_DEFS: tuple[MenuCategory, ...] = (
         "select",
         "category_select",
         "Select",
-        "Select model topology.",
-        "Select an object, face, edge, or vertex",
+        "Choose what viewport clicks select.",
+        "Choose Object, Face, Edge, or Vertex selection mode",
     ),
     MenuCategory(
         "create",
         "category_create",
         "Create",
-        "Create a new body.",
-        "Create a body or import geometry",
+        "Add or import geometry.",
+        "Create: add a box body or import STEP geometry",
     ),
     MenuCategory(
         "modify",
         "category_modify",
         "Modify",
         "Use face, edge, vertex, and sketch profile modification tools.",
-        "Select a face, edge, vertex, or sketch profile",
+        "Select a face, edge, vertex, or sketch profile to modify",
     ),
     MenuCategory(
         "sketch",
@@ -62,7 +62,7 @@ CATEGORY_DEFS: tuple[MenuCategory, ...] = (
         "category_measure",
         "Measure",
         "Measure model geometry.",
-        "Measure tools are not implemented yet",
+        "Select an edge to measure distance",
     ),
     MenuCategory(
         "view",
@@ -85,7 +85,7 @@ CATEGORY_IDS = tuple(category.category_id for category in CATEGORY_DEFS)
 CATEGORY_RAIL_ACTIONS = tuple(
     category.action_name
     for category in CATEGORY_DEFS
-    if category.action_name != "category_create"
+    if category.action_name not in {"category_create", "category_file"}
 )
 
 TOP_TOOLBAR_ACTIONS = (
@@ -120,12 +120,10 @@ SKETCH_ACTIVE_ACTIONS = (*SKETCH_DRAW_ACTIONS, "finish_sketch")
 PROFILE_ACTIONS = (
     "edit_sketch",
     "edit_sketch_dimensions",
+    "edit_position",
     "sketch_trim",
     "move_sketch",
-    "move_sketch_x",
-    "move_sketch_y",
-    "move_sketch_z",
-    "sketch_extrude",
+    "push_pull",
     "sketch_new_body",
     "sketch_revolve",
     "sketch_revolve_x",
@@ -135,36 +133,24 @@ PROFILE_ACTIONS = (
 )
 SKETCH_OBJECT_ACTIONS = (
     "edit_sketch",
+    "edit_position",
     "sketch_trim",
     "move_sketch",
-    "move_sketch_x",
-    "move_sketch_y",
-    "move_sketch_z",
     "delete_sketch",
 )
 MULTI_PROFILE_ACTIONS = (
     "move_sketch",
-    "move_sketch_x",
-    "move_sketch_y",
-    "move_sketch_z",
-    "sketch_extrude",
+    "push_pull",
     "sketch_new_body",
     "delete_sketch",
 )
-MULTI_BODY_ACTIONS = (
-    "move_object",
-    "move_object_x",
-    "move_object_y",
-    "move_object_z",
-)
+MULTI_BODY_ACTIONS = ("move_object",)
 
-CREATE_ACTIONS = ("add_box", "import_step", "export_step")
+CREATE_ACTIONS = ("add_box", "import_step")
 BODY_ACTIONS = (
     "edit_box_dimensions",
+    "edit_position",
     "move_object",
-    "move_object_x",
-    "move_object_y",
-    "move_object_z",
     "rotate_body",
     "rotate_body_x",
     "rotate_body_y",
@@ -189,7 +175,7 @@ MEASURE_ACTIONS = (
 FACE_MODIFY_ACTIONS = (
     "start_sketch",
     "edit_box_dimensions",
-    "extrude",
+    "push_pull",
     "move_selection",
     "move_selection_normal",
     "offset_face",
@@ -205,10 +191,7 @@ EDGE_MODIFY_ACTIONS = (
     "move_selection",
 )
 VERTEX_MODIFY_ACTIONS = ("move_selection",)
-EMPTY_MODIFY_SECTIONS = (
-    ("Face Tools", FACE_MODIFY_ACTIONS),
-    ("Edge Tools", ("measure_distance", "fillet", "chamfer")),
-)
+EMPTY_MODIFY_SECTIONS = ()
 
 
 def validate_category_id(category_id: str) -> MenuCategory:

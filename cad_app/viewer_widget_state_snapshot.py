@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from enum import Enum
+
+from cad_app.gui_contract import LAYOUT_REGIONS
 from cad_app.sketch import SKETCH_ENTITY_META_KIND, is_sketch_profile
 from cad_app.types import OperationState, UIState
 
@@ -26,6 +29,165 @@ class ViewerWidgetStateSnapshotMixin:
             manipulator_visible=self._ui_manipulator_visible(),
             right_panel_context=self._ui_right_panel_context(),
         )
+
+    def export_ui_state(self) -> dict:
+        """Return a JSON-serializable GUI contract snapshot."""
+        state = self.get_ui_state()
+        return {
+            "schema": "cad_gui_state.v1",
+            "state": {
+                "work_mode": state.work_mode,
+                "selection_mode": state.selection_mode,
+                "selection_type": state.selection_type,
+                "active_tool": state.active_tool,
+                "active_operation": self._json_value(state.active_operation),
+                "context_actions": list(state.context_actions),
+                "status_text": state.status_text,
+                "hint_text": state.hint_text,
+                "overlay_visible": state.overlay_visible,
+                "overlay_text": state.overlay_text,
+                "manipulator_visible": state.manipulator_visible,
+                "right_panel_context": state.right_panel_context,
+            },
+            "regions": self._export_layout_regions(),
+            "actions": self._export_action_states(),
+            "context_tool_panel": self._export_context_tool_panel(),
+            "hud": self._export_hud_state(),
+        }
+
+    def _export_layout_regions(self) -> dict[str, dict]:
+        from PySide6.QtWidgets import QToolBar, QWidget
+
+        window = self.window()
+        regions: dict[str, dict] = {}
+        for object_name in LAYOUT_REGIONS:
+            widget = window.findChild(QWidget, object_name)
+            toolbar_actions = []
+            if isinstance(widget, QToolBar):
+                toolbar_actions = [
+                    entry
+                    for entry in self._toolbar_action_entries(widget)
+                    if not entry["is_section_label"]
+                ]
+            regions[object_name] = {
+                "object_name": widget.objectName() if widget is not None else "",
+                "class": widget.metaObject().className() if widget is not None else "",
+                "present": widget is not None,
+                "visible": False if widget is None else not widget.isHidden(),
+                "enabled": False if widget is None else widget.isEnabled(),
+                "actions": toolbar_actions,
+            }
+        return regions
+
+    def _export_action_states(self) -> dict[str, dict]:
+        context_action_names = {
+            entry["name"]
+            for entry in self._export_context_tool_panel()["entries"]
+            if not entry["is_section_label"]
+        }
+        context_button_names = {
+            entry["name"]: entry["button_object_name"]
+            for entry in self._export_context_tool_panel()["entries"]
+            if not entry["is_section_label"]
+        }
+        return {
+            action_name: {
+                "object_name": action.objectName(),
+                "text": action.text().replace("&", ""),
+                "enabled": action.isEnabled(),
+                "checked": action.isCheckable() and action.isChecked(),
+                "checkable": action.isCheckable(),
+                "visible": action.isVisible(),
+                "status_tip": action.statusTip(),
+                "in_context_tool_panel": action_name in context_action_names,
+                "button_object_name": context_button_names.get(action_name, ""),
+            }
+            for action_name, action in self._actions.items()
+        }
+
+    def _export_context_tool_panel(self) -> dict:
+        from PySide6.QtWidgets import QToolBar
+
+        toolbar = self.window().findChild(QToolBar, "context_tool_panel")
+        entries = [] if toolbar is None else self._toolbar_action_entries(toolbar)
+        return {
+            "object_name": "" if toolbar is None else toolbar.objectName(),
+            "present": toolbar is not None,
+            "visible": False if toolbar is None else not toolbar.isHidden(),
+            "enabled": False if toolbar is None else toolbar.isEnabled(),
+            "entries": entries,
+            "sections": self._context_sections_from_toolbar_entries(entries),
+            "actions": [
+                entry["name"] for entry in entries if not entry["is_section_label"]
+            ],
+        }
+
+    @staticmethod
+    def _context_sections_from_toolbar_entries(
+        entries: list[dict],
+    ) -> list[dict[str, object]]:
+        sections: list[dict[str, object]] = []
+        current_section: dict[str, object] | None = None
+        for entry in entries:
+            if entry["is_section_label"]:
+                current_section = {"name": entry["text"], "actions": []}
+                sections.append(current_section)
+                continue
+            if current_section is None:
+                current_section = {"name": "", "actions": []}
+                sections.append(current_section)
+            current_section["actions"].append(entry["name"])
+        return sections
+
+    @staticmethod
+    def _toolbar_action_entries(toolbar) -> list[dict]:
+        entries = []
+        for action in toolbar.actions():
+            action_name = action.objectName()
+            if not action_name:
+                continue
+            button = toolbar.widgetForAction(action)
+            entries.append(
+                {
+                    "name": action_name,
+                    "text": action.text().replace("&", ""),
+                    "enabled": action.isEnabled(),
+                    "checked": action.isCheckable() and action.isChecked(),
+                    "checkable": action.isCheckable(),
+                    "visible": action.isVisible(),
+                    "is_section_label": action_name.startswith("context_label_"),
+                    "button_object_name": (
+                        "" if button is None else button.objectName()
+                    ),
+                }
+            )
+        return entries
+
+    def _export_hud_state(self) -> dict[str, dict]:
+        return {
+            name: {
+                "object_name": label.objectName(),
+                "text": label.text(),
+                "visible": not label.isHidden(),
+                "enabled": label.isEnabled(),
+            }
+            for name, label in self._hud_labels.items()
+        }
+
+    @staticmethod
+    def _json_value(value):
+        if isinstance(value, Enum):
+            return value.value
+        if isinstance(value, tuple):
+            return [ViewerWidgetStateSnapshotMixin._json_value(item) for item in value]
+        if isinstance(value, list):
+            return [ViewerWidgetStateSnapshotMixin._json_value(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                key: ViewerWidgetStateSnapshotMixin._json_value(item)
+                for key, item in value.items()
+            }
+        return value
 
     def _ui_selection_type(self) -> str:
         selections = self._scene.selection_refs()
@@ -93,7 +255,8 @@ class ViewerWidgetStateSnapshotMixin:
     def _ui_manipulator_visible(self) -> bool:
         return bool(
             self._move_session is not None
-            and self._move_session.tool in {"extrude", "sketch_extrude"}
+            and self._move_session.tool
+            in {"extrude", "sketch_extrude", "move", "sketch_move"}
         )
 
     def _ui_right_panel_context(self) -> str:

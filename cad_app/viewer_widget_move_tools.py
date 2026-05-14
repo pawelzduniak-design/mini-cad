@@ -33,6 +33,11 @@ BROWSER_ITEM_ID_ROLE = Qt.UserRole
 BROWSER_SELECTION_KIND_ROLE = Qt.UserRole + 1
 BROWSER_SELECTION_INDEX_ROLE = Qt.UserRole + 2
 BROWSER_COMMAND_ROLE = Qt.UserRole + 3
+MOVE_MANIPULATOR_AXES = {
+    "X": (1.0, 0.0, 0.0),
+    "Y": (0.0, 1.0, 0.0),
+    "Z": (0.0, 0.0, 1.0),
+}
 
 
 class ViewerWidgetMoveToolsMixin:
@@ -92,6 +97,7 @@ class ViewerWidgetMoveToolsMixin:
         )
         self._show_status(f"{action_name }: drag value")
         self._refresh_hud()
+        self._refresh_action_state()
         LOGGER.info("%s tool started item_id=%s edge=%d", tool, item_id, edge_index)
 
     def _move_selected(self, distance: float) -> None:
@@ -177,6 +183,7 @@ class ViewerWidgetMoveToolsMixin:
                 f"Move {body_label} {axis_name }: drag, Enter apply, Esc cancel"
             )
         self._refresh_hud()
+        self._refresh_action_state()
         LOGGER.info(
             "Move tool started for object item_ids=%s axis=%s",
             selected_body_item_ids,
@@ -231,6 +238,7 @@ class ViewerWidgetMoveToolsMixin:
         )
         self._show_status(f"Rotate body {axis_name }: drag angle")
         self._refresh_hud()
+        self._refresh_action_state()
         LOGGER.info(
             "Rotate tool started item_id=%s axis=%s",
             item_id,
@@ -353,6 +361,7 @@ class ViewerWidgetMoveToolsMixin:
                 "drag, Enter apply, Esc cancel"
             )
         self._refresh_hud()
+        self._refresh_action_state()
         LOGGER.info(
             "Move tool started kind=%s item_id=%s index=%s axis=%s",
             selection.kind.value,
@@ -422,6 +431,66 @@ class ViewerWidgetMoveToolsMixin:
             (0.0, 0.0, 0.0),
         )
 
+    def _begin_push_pull_tool(self) -> None:
+        if self._selected_sketch_profile_item_ids():
+            self._begin_sketch_profile_extrude_tool("auto")
+            return
+        self._begin_extrude_tool()
+
+    def _set_move_axis_from_manipulator(self, axis_name: str) -> None:
+        axis = MOVE_MANIPULATOR_AXES.get(axis_name)
+        if axis is None or self._move_session is None:
+            return
+        if self._move_session.tool not in {"move", "sketch_move"}:
+            return
+        self._move_session.axis_name = axis_name
+        self._move_session.axis = axis
+        self._move_session.vector = None
+        self._move_axis_name = axis_name
+        self._move_axis = axis
+        if hasattr(self, "_orientation_gizmo_overlay"):
+            self._orientation_gizmo_overlay.set_axis_name(axis_name)
+        self._show_status(f"Move axis: {axis_name}")
+        LOGGER.info("Move manipulator axis set to %s", axis_name)
+
+    def _refresh_move_manipulator(self) -> None:
+        if not hasattr(self, "_move_manipulator_overlay"):
+            return
+        if not self._move_manipulator_active():
+            self._move_manipulator_overlay.hide()
+            return
+        self._position_move_manipulator_overlay()
+        self._move_manipulator_overlay.show()
+        self._move_manipulator_overlay.raise_()
+
+    def _move_manipulator_active(self) -> bool:
+        return bool(
+            self._move_session is not None
+            and self._move_session.tool in {"move", "sketch_move"}
+        )
+
+    def _position_move_manipulator_overlay(self) -> None:
+        if not hasattr(self, "_move_manipulator_overlay"):
+            return
+        overlay = self._move_manipulator_overlay
+        size = overlay.width()
+        x = (self.width() - size) // 2
+        y = (self.height() - size) // 2
+        if self._move_manipulator_active() and self._viewer.is_initialized:
+            try:
+                anchor = self._move_anchor_point(self._move_session)
+                if anchor is not None:
+                    screen_x, screen_y = self._viewer.view.Convert(*anchor)
+                    scale = self.devicePixelRatioF() or 1.0
+                    x = int(round(screen_x / scale - size / 2))
+                    y = int(round(screen_y / scale - size / 2))
+            except (CommandError, IndexError, RuntimeError, ValueError):
+                LOGGER.debug("Move manipulator positioning fallback", exc_info=True)
+        margin = 6
+        max_x = max(margin, self.width() - size - margin)
+        max_y = max(margin, self.height() - size - margin)
+        overlay.move(min(max(x, margin), max_x), min(max(y, margin), max_y))
+
     def _begin_extrude_tool(self, sketch_operation: str = "auto") -> None:
         if self._sketch_session is not None:
             if not self._finish_sketch_for_modeling_command():
@@ -448,9 +517,9 @@ class ViewerWidgetMoveToolsMixin:
                 self._show_status("New bodies: drag arrow, Enter apply, Esc cancel")
             else:
                 self._set_context_hint(
-                    "Drag arrow to extrude selected profiles, Enter accept, Esc cancel"
+                    "Push/Pull selected profiles, Enter accept, Esc cancel"
                 )
-                self._show_status("Sketch profiles extrude: drag arrow")
+                self._show_status("Sketch profiles Push/Pull: drag arrow")
             self._show_dimension_overlay(
                 self._move_overlay_label(self._move_session),
                 self.width() // 2,
@@ -458,6 +527,7 @@ class ViewerWidgetMoveToolsMixin:
             )
             self._update_extrude_affordance()
             self._refresh_hud()
+            self._refresh_action_state()
             LOGGER.info(
                 "Sketch multi-extrude tool started item_ids=%s",
                 profile_item_ids,
@@ -470,6 +540,7 @@ class ViewerWidgetMoveToolsMixin:
             return
         is_profile = is_sketch_profile(self._scene.get(item_id).meta)
         axis = self._face_normal(item_id, face_index)
+        initial_distance = -10.0 if is_profile and sketch_operation == "cut" else 0.0
         self._move_session = MoveSession(
             tool="sketch_extrude" if is_profile else "extrude",
             target_kind=SelectionKind.FACE,
@@ -478,6 +549,7 @@ class ViewerWidgetMoveToolsMixin:
             axis_name="Normal",
             axis=axis,
             operation=sketch_operation if is_profile else "auto",
+            distance=initial_distance,
         )
         self._viewer.clear_preview_marker()
         if is_profile and sketch_operation == "new_body":
@@ -485,14 +557,21 @@ class ViewerWidgetMoveToolsMixin:
                 "Drag arrow to create a separate body, Enter accept, Esc cancel"
             )
             self._show_status("New body: drag arrow, Enter apply, Esc cancel")
+        elif is_profile and sketch_operation == "cut":
+            self._set_context_hint(
+                "Cut: drag depth, Enter subtract from body, Esc cancel"
+            )
+            self._show_status("Cut: drag depth, Enter apply, Esc cancel")
         elif is_profile:
-            self._set_context_hint("Drag arrow to extrude, Enter accept, Esc cancel")
-            self._show_status("Sketch extrude: drag arrow, Enter apply, Esc cancel")
+            self._set_context_hint(
+                "Push/Pull: drag height, use Cut into host when needed, Enter apply"
+            )
+            self._show_status("Push/Pull: drag height, Enter apply, Esc cancel")
         else:
             self._set_context_hint(
-                "Drag arrow to push/pull face, Enter accept, Esc cancel"
+                "Push/Pull face: drag inward or outward, Enter accept, Esc cancel"
             )
-            self._show_status("Extrude: drag arrow, Enter apply, Esc cancel")
+            self._show_status("Push/Pull: drag arrow, Enter apply, Esc cancel")
         self._show_dimension_overlay(
             self._move_overlay_label(self._move_session),
             self.width() // 2,
@@ -500,6 +579,7 @@ class ViewerWidgetMoveToolsMixin:
         )
         self._update_extrude_affordance()
         self._refresh_hud()
+        self._refresh_action_state()
         LOGGER.info(
             "%s tool started item_id=%s face=%s",
             "Sketch extrude" if is_profile else "Extrude",

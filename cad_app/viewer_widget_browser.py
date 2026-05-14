@@ -50,6 +50,8 @@ class ViewerWidgetBrowserMixin:
             if "hint" in self._hud_labels:
                 self._hud_labels["hint"].setText(self._context_hint_text)
         self._refresh_tool_popover()
+        if hasattr(self, "_refresh_move_manipulator"):
+            self._refresh_move_manipulator()
         if not self._is_live_drag_refresh():
             self._refresh_action_state()
             self._refresh_browser()
@@ -321,17 +323,25 @@ class ViewerWidgetBrowserMixin:
             tool_name = (
                 "New Body"
                 if self._move_session.operation == "new_body"
-                else self._move_session.tool.replace("_", " ").title()
+                else (
+                    "Push/Pull Cut"
+                    if self._move_session.operation == "cut"
+                    else self._move_session.tool.replace("_", " ").title()
+                )
             )
             operation = "New Body"
             if self._move_session.tool == "extrude":
-                operation = "Add / Cut"
+                tool_name = "Push/Pull"
+                operation = "Push/Pull"
             elif self._move_session.tool == "sketch_extrude":
-                operation = (
-                    "New Body"
-                    if self._move_session.operation == "new_body"
-                    else "Feature"
-                )
+                if self._move_session.operation == "new_body":
+                    operation = "New Body"
+                elif self._move_session.operation == "cut":
+                    tool_name = "Push/Pull Cut"
+                    operation = "Cut"
+                else:
+                    tool_name = "Push/Pull"
+                    operation = "Add"
             elif self._move_session.tool == "rotate":
                 operation = "Transform"
             elif self._move_session.tool in {"move", "sketch_move"}:
@@ -516,6 +526,8 @@ class ViewerWidgetBrowserMixin:
             return f"Radius: {session .distance :.2f} mm"
         if session.tool == "chamfer":
             return f"Distance: {session .distance :.2f} mm"
+        if session.tool == "sketch_extrude" and session.operation == "cut":
+            return f"Depth: {abs(session .distance) :.2f} mm"
         return f"Distance: {session .distance :.2f} mm"
 
     def _populate_property_actions(self, properties_list) -> None:

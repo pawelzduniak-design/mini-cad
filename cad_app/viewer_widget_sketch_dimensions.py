@@ -50,6 +50,7 @@ BROWSER_COMMAND_ROLE = Qt.UserRole + 3
 class ViewerWidgetSketchDimensionsMixin(ViewerWidgetSketchDimensionUIMixin):
     def _start_sketch_on_selection(self) -> None:
         edit_target: tuple[str, int] | None = None
+        feature_host: tuple[str, int] | None = None
         item_id, face_index = self._selected_face()
         if item_id is None or face_index is None:
             self._start_sketch_session(
@@ -70,6 +71,8 @@ class ViewerWidgetSketchDimensionsMixin(ViewerWidgetSketchDimensionUIMixin):
                 selected_object.meta
             ):
                 edit_target = (item_id, face_index)
+            elif not is_sketch_profile(selected_object.meta):
+                feature_host = (item_id, face_index)
         except (CommandError, IndexError, ValueError) as exc:
             LOGGER.warning(
                 "Sketch start failed item_id=%s face=%s: %s",
@@ -85,6 +88,7 @@ class ViewerWidgetSketchDimensionsMixin(ViewerWidgetSketchDimensionUIMixin):
             f"new sketch on face plane {face_index }",
             edit_target,
         )
+        self._active_workplane_host = feature_host
 
     def _start_new_sketch_on_selection(self) -> None:
         self._start_sketch_on_selection()

@@ -80,6 +80,10 @@ class MainWindow:
     picker: Any
     actions: dict[str, Any]
 
+    def export_ui_state(self) -> dict:
+        """Return a JSON-serializable snapshot of the visible GUI contract."""
+        return self.viewer_widget.export_ui_state()
+
 
 @dataclass
 class MoveSession:

@@ -35,6 +35,57 @@ def _select_topology(widget, scene, item_id, kind, index, category: str):
     return widget.get_ui_state()
 
 
+def test_selection_mode_actions_and_shortcuts_switch_to_select(qapp) -> None:
+    require_ocp()
+
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+
+    from cad_app.engine import make_box
+    from cad_app.main_window import create_main_window
+    from cad_app.scene import Scene
+    from cad_app.types import SelectionKind, SelectionRef
+    from cad_app.ui_menu import SELECT_ACTIONS
+    from cad_app.viewer import Viewer
+
+    scene = Scene()
+    item_id = scene.add_shape(make_box(), meta={"kind": "body", "source": "box"})
+    main_window = create_main_window(Viewer(), scene)
+    widget = main_window.viewer_widget
+
+    for action_name, expected_mode in (
+        ("select_object", "object"),
+        ("select_face", "face"),
+        ("select_edge", "edge"),
+        ("select_vertex", "vertex"),
+    ):
+        scene.set_selection(SelectionRef(item_id, SelectionKind.OBJECT, 0))
+        widget._set_active_category("view")
+        main_window.actions[action_name].trigger()
+
+        state = widget.get_ui_state()
+        assert state.work_mode == "select"
+        assert state.selection_mode == expected_mode
+        assert state.selection_type == "none"
+        assert state.context_actions == SELECT_ACTIONS
+        assert _command_action_names(main_window) == SELECT_ACTIONS
+        _assert_command_surface_matches_state(main_window)
+
+    for key, expected_mode in (
+        (Qt.Key_1, "object"),
+        (Qt.Key_2, "face"),
+        (Qt.Key_3, "edge"),
+        (Qt.Key_4, "vertex"),
+    ):
+        widget._set_active_category("view")
+        widget.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, key, Qt.NoModifier))
+
+        state = widget.get_ui_state()
+        assert state.work_mode == "select"
+        assert state.selection_mode == expected_mode
+        assert state.context_actions == SELECT_ACTIONS
+
+
 def test_clicking_contract_body_topology_context_matrix(qapp) -> None:
     require_ocp()
 
@@ -119,6 +170,41 @@ def test_clicking_contract_body_topology_context_matrix(qapp) -> None:
     assert state.context_actions == VERTEX_MODIFY_ACTIONS
     assert main_window.actions["move_selection"].text() == "Move Vertex"
     _assert_command_surface_matches_state(main_window)
+
+
+def test_transform_category_does_not_promote_topology_to_body_tools(qapp) -> None:
+    require_ocp()
+
+    from cad_app.commands import top_planar_face_index
+    from cad_app.engine import make_box
+    from cad_app.main_window import create_main_window
+    from cad_app.scene import Scene
+    from cad_app.types import SelectionKind, SelectionRef
+    from cad_app.viewer import Viewer
+
+    scene = Scene()
+    shape = make_box()
+    item_id = scene.add_shape(shape, meta={"kind": "body", "source": "box"})
+    main_window = create_main_window(Viewer(), scene)
+    widget = main_window.viewer_widget
+
+    for selection in (
+        SelectionRef(item_id, SelectionKind.FACE, top_planar_face_index(shape)),
+        SelectionRef(item_id, SelectionKind.EDGE, 1),
+        SelectionRef(item_id, SelectionKind.VERTEX, 1),
+    ):
+        scene.set_selection(selection)
+        widget._selection_kind = selection.kind
+        widget._set_active_category("transform")
+
+        state = widget.get_ui_state()
+        assert state.work_mode == "transform"
+        assert state.context_actions == ()
+        assert _command_action_names(main_window) == ()
+        assert not main_window.actions["move_object"].isEnabled()
+        assert not main_window.actions["rotate_body"].isEnabled()
+        assert not main_window.actions["mirror_body"].isEnabled()
+        _assert_command_surface_matches_state(main_window)
 
 
 def test_clicking_contract_sketch_profile_context_matrix(qapp) -> None:
@@ -398,6 +484,8 @@ def test_multi_body_move_applies_to_all_selected_bodies(qapp) -> None:
     require_ocp()
 
     import pytest
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
 
     from cad_app.commands import translated_shape
     from cad_app.engine import make_box
@@ -426,9 +514,19 @@ def test_multi_body_move_applies_to_all_selected_bodies(qapp) -> None:
     widget._selection_kind = SelectionKind.OBJECT
     widget._set_active_category("transform")
 
-    main_window.actions["move_object_x"].trigger()
+    main_window.actions["move_object"].trigger()
     assert widget._move_session is not None
+    assert widget.get_ui_state().manipulator_visible
+    assert widget.get_ui_state().context_actions == ("move_object", "cancel_tool")
+    assert _command_action_names(main_window) == ("move_object", "cancel_tool")
     assert widget._move_session.item_ids == (first_id, second_id)
+    QTest.mouseClick(
+        widget._move_manipulator_overlay,
+        Qt.LeftButton,
+        Qt.NoModifier,
+        QPoint(136, 78),
+    )
+    assert widget._move_session.axis_name == "X"
     widget._move_session.distance = 12.0
     widget._commit_move_session()
 
@@ -456,7 +554,7 @@ def test_move_properties_report_transform_operation(qapp) -> None:
     widget = main_window.viewer_widget
     widget._set_active_category("transform")
 
-    main_window.actions["move_object_x"].trigger()
+    main_window.actions["move_object"].trigger()
     properties = widget._browser_lists["properties"]
     texts = [properties.item(index).text() for index in range(properties.count())]
 
@@ -500,10 +598,14 @@ def test_sketch_move_translates_profile_and_dimension_metadata(qapp) -> None:
     widget = main_window.viewer_widget
     widget._set_active_category("modify")
 
-    main_window.actions["move_sketch_x"].trigger()
+    main_window.actions["move_sketch"].trigger()
     assert widget._move_session is not None
+    assert widget.get_ui_state().manipulator_visible
+    assert widget.get_ui_state().context_actions == ("move_sketch", "cancel_tool")
+    assert _command_action_names(main_window) == ("move_sketch", "cancel_tool")
     assert widget._move_session.tool == "sketch_move"
     assert widget._move_session.item_ids == (profile_id,)
+    widget._set_move_axis_from_manipulator("X")
 
     widget._move_session.distance = 12.0
     widget._commit_move_session()
@@ -541,7 +643,7 @@ def test_delete_sketch_removes_selected_profile(qapp) -> None:
     assert main_window.viewer_widget.get_ui_state().selection_type == "none"
 
 
-def test_multi_sketch_profile_extrude_applies_to_all_selected_profiles(qapp) -> None:
+def test_multi_sketch_profile_push_pull_applies_to_all_selected_profiles(qapp) -> None:
     require_ocp()
 
     import pytest
@@ -579,7 +681,7 @@ def test_multi_sketch_profile_extrude_applies_to_all_selected_profiles(qapp) -> 
     widget._selection_kind = SelectionKind.FACE
     widget._set_active_category("modify")
 
-    main_window.actions["sketch_extrude"].trigger()
+    main_window.actions["push_pull"].trigger()
     assert widget._move_session is not None
     assert widget._move_session.item_ids == (rectangle_id, circle_id)
     widget._move_session.distance = 18.0

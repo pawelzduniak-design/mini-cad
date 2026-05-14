@@ -37,6 +37,7 @@ ICON_GLYPHS = {
     "edit_sketch": "Ed",
     "edit_sketch_dimensions": "D",
     "edit_box_dimensions": "D",
+    "edit_position": "XYZ",
     "exit": "Q",
     "export_step": "Ex",
     "extrude": "E",
@@ -62,6 +63,7 @@ ICON_GLYPHS = {
     "move_selection_y": "MY",
     "move_selection_z": "MZ",
     "offset_face": "Of",
+    "push_pull": "P",
     "remove_face": "Rf",
     "redo": "Re",
     "rotate_body": "Ro",
@@ -77,6 +79,7 @@ ICON_GLYPHS = {
     "set_boolean_target": "B",
     "sketch_arc_tool": "A",
     "sketch_circle_tool": "C",
+    "sketch_cut_mode": "Cut",
     "sketch_center_rectangle_tool": "CR",
     "sketch_extrude": "E",
     "sketch_line_tool": "L",
@@ -117,6 +120,7 @@ ICON_ASSET_FILES = {
     "edit_sketch": "02_sketch.png",
     "edit_sketch_dimensions": "02_sketch.png",
     "edit_box_dimensions": "02_sketch.png",
+    "edit_position": "09_move.png",
     "extrude": "08_push_pull.png",
     "extrude_reverse": "08_push_pull.png",
     "fillet": "13_fillet.png",
@@ -137,6 +141,7 @@ ICON_ASSET_FILES = {
     "move_selection_y": "09_move.png",
     "move_selection_z": "09_move.png",
     "offset_face": "12_offset.png",
+    "push_pull": "08_push_pull.png",
     "remove_face": "16_boolean_subtract.png",
     "rotate_body": "10_rotate.png",
     "rotate_body_x": "10_rotate.png",
@@ -150,6 +155,7 @@ ICON_ASSET_FILES = {
     "set_boolean_target": "15_boolean_union.png",
     "sketch_arc_tool": "06_arc.png",
     "sketch_circle_tool": "05_circle.png",
+    "sketch_cut_mode": "16_boolean_subtract.png",
     "sketch_center_rectangle_tool": "04_rectangle.png",
     "sketch_extrude": "07_extrude.png",
     "sketch_line_tool": "03_line.png",
@@ -176,6 +182,7 @@ def icon_group(name: str) -> str:
     if name in {
         "extrude",
         "extrude_reverse",
+        "push_pull",
         "fillet",
         "chamfer",
         "circle_boss",
@@ -184,6 +191,7 @@ def icon_group(name: str) -> str:
         "offset_face",
         "remove_face",
         "edit_box_dimensions",
+        "edit_position",
         "category_modify",
     }:
         return "modify"
@@ -305,6 +313,21 @@ def configure_toolbar(toolbar, *, role: str = "sidebar") -> None:
     toolbar.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
     toolbar.setMinimumWidth(theme.SIDEBAR_WIDTH)
     toolbar.setStyleSheet(theme.sidebar_toolbar_stylesheet())
+
+
+def assign_toolbar_button_object_names(toolbar) -> None:
+    """Give QToolButton widgets stable names derived from their QAction."""
+    toolbar_name = toolbar.objectName()
+    if not toolbar_name:
+        return
+    for action in toolbar.actions():
+        action_name = action.objectName()
+        if not action_name:
+            continue
+        button = toolbar.widgetForAction(action)
+        if button is None:
+            continue
+        button.setObjectName(f"{toolbar_name}__{action_name}")
 
 
 def make_sidebar_section_label(text: str, parent=None):

@@ -7,6 +7,7 @@ from typing import Any
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
@@ -33,6 +34,7 @@ from cad_app.viewer_widget_events import ViewerWidgetEventMixin
 from cad_app.viewer_widget_move_drag import ViewerWidgetMoveDragMixin
 from cad_app.viewer_widget_move_tools import ViewerWidgetMoveToolsMixin
 from cad_app.viewer_widget_overlays import (
+    MoveManipulatorOverlay,
     OrientationGizmoOverlay,
     SelectionBoxOverlay,
     SketchPlaneChooserOverlay,
@@ -93,6 +95,7 @@ class ViewerWidget(
         self._move_pixels_to_units = 0.2
         self._sketch_session: SketchSession | None = None
         self._pending_sketch_tool = "center_rectangle"
+        self._sketch_extrude_operation = "add"
         self._sketch_plane_hover: str | None = None
         self._active_workplane = Workplane.world_xy()
         self._active_workplane_label = "XY"
@@ -161,6 +164,11 @@ class ViewerWidget(
             "perception_object_name",
             "transform_gizmo",
         )
+        self._move_manipulator_overlay = MoveManipulatorOverlay(self)
+        self._move_manipulator_overlay.setProperty(
+            "perception_object_name",
+            "move_manipulator",
+        )
         self._sketch_plane_chooser = SketchPlaneChooserOverlay(
             self,
             hover_callback=self._set_sketch_plane_hover,
@@ -228,6 +236,9 @@ class ViewerWidget(
         self._tool_secondary_input.valueChanged.connect(
             self._tool_secondary_value_changed
         )
+        self._tool_cut_mode_checkbox = QCheckBox("Cut into host", self._tool_popover)
+        self._tool_cut_mode_checkbox.setObjectName("tool_cut_mode")
+        self._tool_cut_mode_checkbox.toggled.connect(self._tool_cut_mode_changed)
 
         button_row = QHBoxLayout()
         self._tool_done_button = QPushButton("Done", self._tool_popover)
@@ -245,6 +256,7 @@ class ViewerWidget(
         layout.addWidget(self._tool_distance_input)
         layout.addWidget(self._tool_secondary_label)
         layout.addWidget(self._tool_secondary_input)
+        layout.addWidget(self._tool_cut_mode_checkbox)
         layout.addLayout(button_row)
         self._tool_popover.hide()
 
@@ -283,6 +295,7 @@ class ViewerWidget(
             self._tool_popover_updating = True
             self._configure_primary_tool_input(self._move_session)
             self._configure_secondary_tool_input(self._move_session)
+            self._configure_cut_mode_input(self._move_session)
             self._tool_popover_updating = False
             self._tool_distance_label.show()
             self._tool_distance_input.show()
@@ -296,6 +309,7 @@ class ViewerWidget(
             self._tool_distance_input.hide()
             self._tool_secondary_label.hide()
             self._tool_secondary_input.hide()
+            self._tool_cut_mode_checkbox.hide()
         if was_hidden or layout_key != self._tool_popover_layout_key:
             self._tool_popover.adjustSize()
             self._tool_popover_layout_key = layout_key
@@ -315,6 +329,12 @@ class ViewerWidget(
 
     @staticmethod
     def _tool_popover_summary_text(session: MoveSession) -> str:
+        if session.tool in {"extrude", "sketch_extrude"}:
+            operation = "cut" if session.operation == "cut" else "push/pull"
+            return (
+                f"Direction: {session.axis_name}; "
+                f"{operation} {abs(session.distance):.2f} mm"
+            )
         if session.tool == "sketch_revolve":
             return (
                 f"Axis: {session.axis_name}; angle {session.distance:.2f} deg; "
@@ -353,6 +373,18 @@ class ViewerWidget(
         self._tool_secondary_label.show()
         self._tool_secondary_input.show()
 
+    def _configure_cut_mode_input(self, session: MoveSession) -> None:
+        show_cut_mode = (
+            session.tool == "sketch_extrude"
+            and session.operation != "new_body"
+            and self._selected_sketch_profile_has_host()
+        )
+        if not show_cut_mode:
+            self._tool_cut_mode_checkbox.hide()
+            return
+        self._tool_cut_mode_checkbox.setChecked(session.operation == "cut")
+        self._tool_cut_mode_checkbox.show()
+
     def _tool_primary_value_changed(self, value: float) -> None:
         if self._tool_popover_updating or self._move_session is None:
             return
@@ -364,6 +396,20 @@ class ViewerWidget(
             return
         if self._move_session.tool == "sketch_revolve":
             self._move_session.elevation = float(value)
+        self._update_tool_parameter_preview()
+
+    def _tool_cut_mode_changed(self, checked: bool) -> None:
+        if self._tool_popover_updating or self._move_session is None:
+            return
+        if self._move_session.tool != "sketch_extrude":
+            return
+        self._move_session.operation = "cut" if checked else "auto"
+        if checked:
+            self._move_session.distance = -abs(self._move_session.distance or 10.0)
+            self._set_context_hint("Push/Pull will subtract from the host body")
+        else:
+            self._move_session.distance = abs(self._move_session.distance)
+            self._set_context_hint("Push/Pull will add material from the host sketch")
         self._update_tool_parameter_preview()
 
     def _update_tool_parameter_preview(self) -> None:

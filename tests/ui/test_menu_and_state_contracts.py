@@ -18,11 +18,11 @@ def test_category_rail_and_initial_context(qapp) -> None:
 
     from cad_app.main_window import create_main_window
     from cad_app.scene import Scene
-    from cad_app.ui_menu import CATEGORY_RAIL_ACTIONS, SELECT_ACTIONS
+    from cad_app.ui_menu import CATEGORY_RAIL_ACTIONS
     from cad_app.viewer import Viewer
 
     main_window = create_main_window(Viewer(), Scene())
-    category_toolbar = main_window.window.findChild(QToolBar, "CategoryToolbar")
+    category_toolbar = main_window.window.findChild(QToolBar, "left_menu")
 
     assert list(main_window.actions) != []
     assert category_toolbar is not None
@@ -33,8 +33,9 @@ def test_category_rail_and_initial_context(qapp) -> None:
     ]
     assert rail_actions == list(CATEGORY_RAIL_ACTIONS)
     assert "category_create" not in rail_actions
-    assert _command_action_names(main_window) == list(SELECT_ACTIONS)
-    assert main_window.viewer_widget.get_ui_state().work_mode == "select"
+    assert "category_file" not in rail_actions
+    assert _command_action_names(main_window) == ["start_sketch"]
+    assert main_window.viewer_widget.get_ui_state().work_mode == "sketch"
 
 
 def test_start_sketch_uses_bottom_plane_without_host(qapp) -> None:
@@ -53,6 +54,29 @@ def test_start_sketch_uses_bottom_plane_without_host(qapp) -> None:
     assert widget._sketch_session.host is None
     assert widget._active_workplane_host is None
     assert widget.get_ui_state().active_tool.startswith("sketch:")
+
+
+def test_start_sketch_on_body_face_sets_feature_host(qapp) -> None:
+    require_ocp()
+
+    from cad_app.commands import top_planar_face_index
+    from cad_app.engine import make_box
+    from cad_app.main_window import create_main_window
+    from cad_app.scene import Scene
+    from cad_app.types import SelectionKind, SelectionRef
+    from cad_app.viewer import Viewer
+
+    scene = Scene()
+    shape = make_box()
+    item_id = scene.add_shape(shape, meta={"kind": "body", "source": "primitive_box"})
+    face_index = top_planar_face_index(shape)
+    scene.set_selection(SelectionRef(item_id, SelectionKind.FACE, face_index))
+    main_window = create_main_window(Viewer(), scene)
+
+    main_window.actions["start_sketch"].trigger()
+    widget = main_window.viewer_widget
+
+    assert widget._active_workplane_host == (item_id, face_index)
 
 
 def test_sketch_profile_context_promotes_profile_commands(qapp) -> None:
@@ -75,10 +99,175 @@ def test_sketch_profile_context_promotes_profile_commands(qapp) -> None:
     main_window.viewer_widget._set_active_category("modify")
     actions = _command_action_names(main_window)
 
-    assert "sketch_extrude" in actions
+    assert "push_pull" in actions
     assert "sketch_new_body" in actions
     assert "sketch_revolve" in actions
     assert "extrude" not in main_window.viewer_widget.get_ui_state().context_actions
+
+
+def test_hosted_sketch_profile_exposes_cut_and_subtracts_body(qapp) -> None:
+    require_ocp()
+
+    from cad_app.commands import top_planar_face_index
+    from cad_app.engine import make_box
+    from cad_app.main_window import create_main_window
+    from cad_app.picker import Picker
+    from cad_app.scene import Scene
+    from cad_app.sketch import SKETCH_META_KIND, make_center_rectangle_profile
+    from cad_app.types import SelectionKind, SelectionRef
+    from cad_app.viewer import Viewer
+    from cad_app.workplane import Workplane
+    from tests.helpers.topology import count_subshapes
+
+    scene = Scene()
+    shape = make_box(60.0, 50.0, 40.0)
+    body_id = scene.add_shape(shape, meta={"kind": "body", "source": "primitive_box"})
+    face_index = top_planar_face_index(shape)
+    picker = Picker(scene)
+    from OCP.TopoDS import TopoDS
+
+    workplane = Workplane.from_face(
+        TopoDS.Face_s(picker.subshape(body_id, SelectionKind.FACE, face_index))
+    )
+    profile_id = scene.add_shape(
+        make_center_rectangle_profile(workplane, (0.0, 0.0), (8.0, 8.0)),
+        meta={
+            "kind": SKETCH_META_KIND,
+            "profile": "center_rectangle",
+            "host_item_id": body_id,
+            "host_face_index": face_index,
+        },
+    )
+    scene.set_selection(SelectionRef(profile_id, SelectionKind.FACE, 1))
+    main_window = create_main_window(Viewer(), scene)
+    widget = main_window.viewer_widget
+    widget._set_active_category("modify")
+
+    assert "sketch_cut_mode" not in widget.get_ui_state().context_actions
+    assert "push_pull" in widget.get_ui_state().context_actions
+    main_window.actions["push_pull"].trigger()
+    assert widget._move_session is not None
+    assert not widget._tool_cut_mode_checkbox.isHidden()
+    widget._tool_cut_mode_checkbox.setChecked(True)
+    assert widget._move_session.operation == "cut"
+    assert "subtract" in widget.get_ui_state().hint_text
+    widget._tool_distance_input.setValue(16.0)
+    widget._commit_move_session()
+
+    assert profile_id not in scene
+    assert body_id in scene
+    assert scene.active_item_id() == body_id
+    assert scene.get(body_id).meta["last_sketch_feature"] == "center_rectangle"
+    assert count_subshapes(scene.get(body_id).shape, "face") > count_subshapes(
+        shape,
+        "face",
+    )
+
+
+def test_push_pull_face_accepts_signed_distance(qapp) -> None:
+    require_ocp()
+
+    import pytest
+
+    from cad_app.commands import top_planar_face_index
+    from cad_app.engine import make_box
+    from cad_app.main_window import create_main_window
+    from cad_app.measurement import axis_aligned_box_dimensions
+    from cad_app.scene import Scene
+    from cad_app.types import SelectionKind, SelectionRef
+    from cad_app.viewer import Viewer
+
+    for distance, expected_height in ((10.0, 30.0), (-5.0, 15.0)):
+        scene = Scene()
+        shape = make_box(20.0, 20.0, 20.0)
+        item_id = scene.add_shape(shape, meta={"kind": "body", "source": "box"})
+        face_index = top_planar_face_index(shape)
+        scene.set_selection(SelectionRef(item_id, SelectionKind.FACE, face_index))
+        main_window = create_main_window(Viewer(), scene)
+        widget = main_window.viewer_widget
+        widget._set_active_category("modify")
+
+        main_window.actions["push_pull"].trigger()
+        assert widget._move_session is not None
+        assert widget.get_ui_state().context_actions == ("push_pull", "cancel_tool")
+        widget._move_session.distance = distance
+        widget._commit_move_session()
+
+        _width, _depth, height, _anchor = axis_aligned_box_dimensions(
+            scene.get(item_id).shape
+        )
+        assert height == pytest.approx(expected_height)
+
+
+def test_boolean_category_exposes_target_action_for_single_body(qapp) -> None:
+    require_ocp()
+
+    from cad_app.engine import make_box
+    from cad_app.main_window import create_main_window
+    from cad_app.scene import Scene
+    from cad_app.viewer import Viewer
+
+    scene = Scene()
+    body_id = scene.add_shape(make_box(), meta={"kind": "body", "source": "box"})
+    main_window = create_main_window(Viewer(), scene)
+    widget = main_window.viewer_widget
+    widget._set_active_category("boolean")
+
+    assert _command_action_names(main_window) == ["set_boolean_target"]
+    main_window.actions["set_boolean_target"].trigger()
+
+    assert widget._boolean_target_item_id == body_id
+    assert "second body" in widget.get_ui_state().hint_text
+
+
+def test_body_and_sketch_position_can_be_set_absolutely(qapp) -> None:
+    require_ocp()
+
+    import pytest
+
+    from cad_app.engine import make_box
+    from cad_app.main_window import create_main_window
+    from cad_app.scene import Scene
+    from cad_app.sketch import SKETCH_META_KIND, make_center_rectangle_profile
+    from cad_app.types import SelectionKind, SelectionRef
+    from cad_app.viewer import Viewer
+    from cad_app.workplane import Workplane
+
+    scene = Scene()
+    body_id = scene.add_shape(
+        make_box(20.0, 20.0, 20.0),
+        meta={"kind": "body", "source": "primitive_box"},
+    )
+    scene.set_selection(SelectionRef(body_id, SelectionKind.OBJECT, 0))
+    main_window = create_main_window(Viewer(), scene)
+    widget = main_window.viewer_widget
+    widget._set_active_category("transform")
+
+    assert "edit_position" in widget.get_ui_state().context_actions
+    widget._set_selected_position((40.0, 50.0, 60.0))
+    assert widget._shape_center(scene.get(body_id).shape) == pytest.approx(
+        (40.0, 50.0, 60.0)
+    )
+
+    profile_id = scene.add_shape(
+        make_center_rectangle_profile(Workplane.world_xy(), (0.0, 0.0), (5.0, 5.0)),
+        meta={
+            "kind": SKETCH_META_KIND,
+            "profile": "center_rectangle",
+            "center_u": 0.0,
+            "center_v": 0.0,
+        },
+    )
+    scene.set_selection(SelectionRef(profile_id, SelectionKind.FACE, 1))
+    widget._set_active_category("modify")
+
+    assert "edit_position" in widget.get_ui_state().context_actions
+    widget._set_selected_position((10.0, 15.0, 0.0))
+    assert widget._shape_center(scene.get(profile_id).shape) == pytest.approx(
+        (10.0, 15.0, 0.0)
+    )
+    assert scene.get(profile_id).meta["center_u"] == pytest.approx(10.0)
+    assert scene.get(profile_id).meta["center_v"] == pytest.approx(15.0)
 
 
 def test_revolve_tool_exposes_numeric_angle_and_elevation(qapp) -> None:

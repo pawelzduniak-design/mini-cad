@@ -282,9 +282,14 @@ class ViewerWidgetMoveDragMixin(ViewerWidgetMovePreviewMixin):
             LOGGER.debug("Extrude affordance failed: %s", exc, exc_info=True)
             self._viewer.clear_extrude_affordance_marker()
             return
-        sign = -1.0 if session.distance < 0 else 1.0
+        distance = (
+            self._sketch_extrude_session_distance(session)
+            if session.tool == "sketch_extrude"
+            else session.distance
+        )
+        sign = -1.0 if distance < 0 else 1.0
         direction = tuple(component * sign for component in session.axis)
-        length = max(25.0, min(55.0, 35.0 + abs(session.distance) * 0.15))
+        length = max(25.0, min(55.0, 35.0 + abs(distance) * 0.15))
         self._viewer.display_extrude_affordance(center, direction, length)
 
     def _face_center(
@@ -413,7 +418,13 @@ class ViewerWidgetMoveDragMixin(ViewerWidgetMovePreviewMixin):
     @staticmethod
     def _move_tool_name(session: MoveSession) -> str:
         if session.tool == "sketch_extrude":
-            return "Sketch Extrude"
+            if session.operation == "cut":
+                return "Push/Pull Cut"
+            if session.operation == "new_body":
+                return "New Body"
+            return "Push/Pull"
+        if session.tool == "extrude":
+            return "Push/Pull"
         if session.tool == "sketch_revolve":
             return "Sketch Revolve"
         if session.tool == "sketch_move":
@@ -439,16 +450,17 @@ class ViewerWidgetMoveDragMixin(ViewerWidgetMovePreviewMixin):
             )
             return
         if session.tool == "sketch_extrude":
+            distance = self._sketch_extrude_session_distance(session)
             if len(session.item_ids) > 1:
                 self._apply_multi_sketch_extrude(
                     session.item_ids,
-                    session.distance,
+                    distance,
                     new_body=session.operation == "new_body",
                 )
                 return
             self._apply_sketch_extrude(
                 session.item_id,
-                session.distance,
+                distance,
                 new_body=session.operation == "new_body",
             )
             return

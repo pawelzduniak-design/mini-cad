@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from cad_app import theme
-from cad_app.ui_chrome import configure_toolbar, make_sidebar_section_label
+from cad_app.ui_chrome import (
+    assign_toolbar_button_object_names,
+    configure_toolbar,
+    make_sidebar_section_label,
+)
 from cad_app.ui_menu import CATEGORY_RAIL_ACTIONS, TOP_TOOLBAR_ACTIONS
 
 
@@ -25,7 +29,7 @@ def build_main_window_layout(
     )
 
     top_toolbar = QToolBar("Project", window)
-    top_toolbar.setObjectName("TopToolbar")
+    top_toolbar.setObjectName("top_bar")
     top_toolbar.setProperty("perception_object_name", "top_bar")
     configure_toolbar(top_toolbar, role="top")
     project_label = QLabel("Direct Modeling CAD", window)
@@ -40,21 +44,23 @@ def build_main_window_layout(
     top_toolbar.addActions(
         [actions[action_name] for action_name in TOP_TOOLBAR_ACTIONS[4:]]
     )
+    assign_toolbar_button_object_names(top_toolbar)
     window.addToolBar(Qt.TopToolBarArea, top_toolbar)
 
     category_toolbar = QToolBar("Main Menu", window)
-    category_toolbar.setObjectName("CategoryToolbar")
-    category_toolbar.setProperty("perception_object_name", "main_menu")
+    category_toolbar.setObjectName("left_menu")
+    category_toolbar.setProperty("perception_object_name", "left_menu")
     configure_toolbar(category_toolbar)
     category_toolbar.addWidget(make_sidebar_section_label("WORKSPACE"))
     category_toolbar.addActions(
         [actions[action_name] for action_name in CATEGORY_RAIL_ACTIONS]
     )
+    assign_toolbar_button_object_names(category_toolbar)
     window.addToolBar(Qt.LeftToolBarArea, category_toolbar)
 
     command_toolbar = QToolBar("Context Tools", window)
-    command_toolbar.setObjectName("CommandToolbar")
-    command_toolbar.setProperty("perception_object_name", "adaptive_menu")
+    command_toolbar.setObjectName("context_tool_panel")
+    command_toolbar.setProperty("perception_object_name", "context_tool_panel")
     configure_toolbar(command_toolbar, role="context")
     window.addToolBarBreak(Qt.LeftToolBarArea)
     window.addToolBar(Qt.LeftToolBarArea, command_toolbar)
@@ -103,7 +109,7 @@ def build_main_window_layout(
     window.addDockWidget(Qt.RightDockWidgetArea, browser_dock)
 
     status_bar = window.statusBar()
-    status_bar.setObjectName("StatusBar")
+    status_bar.setObjectName("bottom_status_bar")
     hud_labels = {
         "mode": QLabel(),
         "selection": QLabel(),

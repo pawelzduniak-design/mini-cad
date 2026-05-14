@@ -446,16 +446,16 @@ class Viewer(ViewerMarkerMixin):
             self.context.Remove(self._view_cube, False)
 
         view_cube = AIS_ViewCube()
-        view_cube.SetSize(55.0)
+        view_cube.SetSize(70.0)
         view_cube.SetYup(False, True)
         view_cube.SetDrawAxes(True)
         view_cube.SetDrawEdges(True)
         view_cube.SetDrawVertices(True)
-        view_cube.SetBoxTransparency(0.05)
-        view_cube.SetBoxColor(Quantity_Color(0.14, 0.19, 0.24, Quantity_TOC_RGB))
-        view_cube.SetInnerColor(Quantity_Color(0.26, 0.34, 0.42, Quantity_TOC_RGB))
-        view_cube.SetTextColor(Quantity_Color(0.95, 0.98, 1.0, Quantity_TOC_RGB))
-        view_cube.SetFontHeight(12.0)
+        view_cube.SetBoxTransparency(0.0)
+        view_cube.SetBoxColor(Quantity_Color(0.04, 0.06, 0.08, Quantity_TOC_RGB))
+        view_cube.SetInnerColor(Quantity_Color(0.10, 0.14, 0.18, Quantity_TOC_RGB))
+        view_cube.SetTextColor(Quantity_Color(1.0, 1.0, 1.0, Quantity_TOC_RGB))
+        view_cube.SetFontHeight(16.0)
         view_cube.SetAxesLabels(
             TCollection_AsciiString("X"),
             TCollection_AsciiString("Y"),

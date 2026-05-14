@@ -328,11 +328,18 @@ def build_main_window_actions(
             "Edit width, height, or radius of the selected sketch profile.",
         ),
         make_action(
+            "edit_position",
+            "Set Position",
+            viewer_widget._edit_selected_position,
+            None,
+            "Set absolute XYZ center position for the selected body or sketch.",
+        ),
+        make_action(
             "move_sketch",
             "Move Sketch",
             viewer_widget._begin_sketch_move_tool,
             None,
-            "Drag the selected sketch geometry in the view plane.",
+            "Drag selected sketch geometry with the viewport move manipulator.",
         ),
         make_action(
             "move_sketch_x",
@@ -386,6 +393,14 @@ def build_main_window_actions(
             "Drag the selected sketch profile into a solid.",
         ),
         make_action(
+            "sketch_cut_mode",
+            "Cut Mode",
+            viewer_widget._toggle_sketch_cut_mode,
+            None,
+            "Toggle sketch extrusion between adding material and cutting material.",
+            checkable=True,
+        ),
+        make_action(
             "sketch_new_body",
             "New Body",
             viewer_widget._begin_sketch_new_body_tool,
@@ -430,7 +445,7 @@ def build_main_window_actions(
             "Move",
             viewer_widget._begin_object_move_tool,
             "G",
-            "Drag the active object along the selected world axis.",
+            "Drag the active object with the viewport move manipulator.",
         ),
         make_action(
             "move_object_x",
@@ -511,7 +526,10 @@ def build_main_window_actions(
             "Move Selection",
             viewer_widget._begin_selected_move_tool,
             "M",
-            "Drag the selected face, edge, or vertex.",
+            (
+                "Drag the selected face, edge, or vertex with the viewport "
+                "move manipulator."
+            ),
         ),
         make_action(
             "move_selection_normal",
@@ -551,10 +569,17 @@ def build_main_window_actions(
             "Drag selected topology along Z.",
         ),
         make_action(
+            "push_pull",
+            "Push/Pull",
+            viewer_widget._begin_push_pull_tool,
+            "E",
+            "Push or pull the selected face or sketch profile.",
+        ),
+        make_action(
             "extrude",
             "Extrude Face",
             viewer_widget._begin_extrude_tool,
-            "E",
+            None,
             "Drag the selected face along its normal.",
         ),
         make_action(

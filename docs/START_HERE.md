@@ -14,9 +14,10 @@ The current source of truth is this documentation set:
 
 - Face, edge, and vertex commands operate on selected topology, not the whole
   body unless the UI explicitly selects a body.
-- `start_sketch` creates an independent sketch by default.
-- A selected face can provide the sketch plane. It must not add `host_item_id`
-  or silently create a hosted feature sketch.
+- `start_sketch` creates an independent sketch by default when no body face is
+  selected.
+- A selected body face provides both sketch plane and feature host so Extrude
+  Sketch plus Cut Mode makes add/subtract an explicit body operation.
 - Existing sketches are edited only through explicit browser/right-panel intent.
 - Category rail clicks change mode/context only. They must not mutate geometry.
 - Undo/redo must protect every committed model mutation.

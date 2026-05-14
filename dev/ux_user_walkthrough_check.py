@@ -49,10 +49,10 @@ def main() -> int:
 
     _log("INFO", "App launched")
     _assert_contains(
-        widget._hud_labels["mode"].text(), "Select", "Initial mode visible: Select"
+        widget._hud_labels["mode"].text(), "Sketch", "Initial mode visible: Sketch"
     )
     _assert_contains(
-        widget._hud_labels["axis"].text(), "object", "Selection mode visible: Object"
+        widget._hud_labels["axis"].text(), "face", "Selection mode visible: Face"
     )
     _assert_contains(
         widget._hud_labels["tool"].text(), "idle", "No conflicting active tools"
@@ -60,6 +60,10 @@ def main() -> int:
     if main_window.actions["category_transform"].isEnabled():
         _fail("Transform is enabled on an empty scene")
     _pass("Transform disabled on empty scene")
+    startup_tools = _command_action_names(main_window)
+    if startup_tools != ["start_sketch"]:
+        _fail(f"Startup sketch action is not clear: {startup_tools}")
+    _pass("Startup New Sketch action is visible")
 
     _log("INFO", "Entering Sketch mode")
     main_window.actions["category_sketch"].trigger()
@@ -135,19 +139,19 @@ def main() -> int:
         "Sketch Profile",
         "UI says Selection: Sketch Profile",
     )
-    if "sketch_extrude" not in _command_action_names(main_window):
-        _fail("Extrude action is not visible for Sketch Profile")
-    _pass("Extrude action is visible")
+    if "push_pull" not in _command_action_names(main_window):
+        _fail("Push/Pull action is not visible for Sketch Profile")
+    _pass("Push/Pull action is visible")
 
-    _log("INFO", "Starting Extrude UX state")
-    main_window.actions["sketch_extrude"].trigger()
+    _log("INFO", "Starting Push/Pull UX state")
+    main_window.actions["push_pull"].trigger()
     _assert_contains(
         widget._hud_labels["tool"].text(),
-        "Sketch Extrude",
-        "Active tool visible: Extrude",
+        "Push/Pull",
+        "Active tool visible: Push/Pull",
     )
     if "idle" in widget._hud_labels["tool"].text():
-        _fail("Status says Tool: idle during Extrude")
+        _fail("Status says Tool: idle during Push/Pull")
     _pass("Status does not say Tool: idle")
     if widget.findChild(QLabel, "DimensionOverlay") is None:
         _fail("Dimension overlay component missing")
@@ -156,12 +160,12 @@ def main() -> int:
         _fail("Dimension overlay is hidden after starting Extrude")
     _pass("Overlay visible near action")
     if not callable(main_window.viewer.display_extrude_affordance):
-        _fail("Extrude affordance renderer missing")
-    _pass("Extrude manipulator/arrow renderer exists")
+        _fail("Push/Pull affordance renderer missing")
+    _pass("Push/Pull manipulator/arrow renderer exists")
     _assert_contains(
         widget.get_ui_state().hint_text,
-        "Drag arrow",
-        "Hint visible: Drag arrow, Enter accept, Esc cancel",
+        "drag height",
+        "Hint visible: drag height, Enter accept, Esc cancel",
     )
 
     _log("INFO", "Checking selection modes")

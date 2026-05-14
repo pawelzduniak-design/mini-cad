@@ -168,14 +168,14 @@ def app_stylesheet() -> str:
 
 def top_toolbar_stylesheet() -> str:
     return f"""
-    QToolBar#TopToolbar {{
+    QToolBar#top_bar {{
         background: {TOP_BAR_BG_2};
         border: none;
         border-bottom: 1px solid #2a3440;
         spacing: 8px;
         padding: 6px 16px;
     }}
-    QToolBar#TopToolbar QToolButton {{
+    QToolBar#top_bar QToolButton {{
         color: {TEXT_PRIMARY};
         background: transparent;
         border: 1px solid transparent;
@@ -184,16 +184,16 @@ def top_toolbar_stylesheet() -> str:
         min-width: 76px;
         min-height: 34px;
     }}
-    QToolBar#TopToolbar QToolButton:hover {{
+    QToolBar#top_bar QToolButton:hover {{
         background: #26313c;
         border-color: #334150;
     }}
-    QToolBar#TopToolbar QToolButton:pressed,
-    QToolBar#TopToolbar QToolButton:checked {{
+    QToolBar#top_bar QToolButton:pressed,
+    QToolBar#top_bar QToolButton:checked {{
         background: #203850;
         border-color: {ACCENT_BLUE};
     }}
-    QToolBar#TopToolbar QToolButton:disabled {{
+    QToolBar#top_bar QToolButton:disabled {{
         color: {DISABLED_TEXT};
     }}
     """
@@ -237,7 +237,7 @@ def sidebar_toolbar_stylesheet() -> str:
 
 def context_toolbar_stylesheet() -> str:
     return f"""
-    QToolBar#CommandToolbar {{
+    QToolBar#context_tool_panel {{
         background: {TOP_BAR_BG_2};
         border: none;
         border-left: 1px solid #26303a;
@@ -245,7 +245,7 @@ def context_toolbar_stylesheet() -> str:
         spacing: 6px;
         padding: 10px 10px;
     }}
-    QToolBar#CommandToolbar QToolButton {{
+    QToolBar#context_tool_panel QToolButton {{
         background: #202832;
         color: {TEXT_PRIMARY};
         border: 1px solid #364250;
@@ -257,17 +257,17 @@ def context_toolbar_stylesheet() -> str:
         max-height: 40px;
         text-align: left;
     }}
-    QToolBar#CommandToolbar QToolButton:hover {{
+    QToolBar#context_tool_panel QToolButton:hover {{
         background: #26323f;
         border-color: {ACCENT_BLUE_HOVER};
     }}
-    QToolBar#CommandToolbar QToolButton:pressed,
-    QToolBar#CommandToolbar QToolButton:checked {{
+    QToolBar#context_tool_panel QToolButton:pressed,
+    QToolBar#context_tool_panel QToolButton:checked {{
         background: {ACCENT_BLUE_ACTIVE};
         border-color: {ACCENT_BLUE_HOVER};
         color: #ffffff;
     }}
-    QToolBar#CommandToolbar QToolButton:disabled {{
+    QToolBar#context_tool_panel QToolButton:disabled {{
         background: #1b222b;
         color: {DISABLED_TEXT};
         border-color: #29323c;

@@ -11,6 +11,7 @@ from cad_app.commands import (
     CommandError,
     apply_circle_feature,
     apply_extrude_face,
+    apply_move_object,
     apply_remove_face,
     apply_thread_to_edge,
     circular_edge_parameters,
@@ -24,6 +25,7 @@ from cad_app.measurement import (
     axis_aligned_box_dimensions,
     edge_measurement,
 )
+from cad_app.sketch import is_sketch_object
 from cad_app.thread_specs import (
     THREAD_MODES,
     THREAD_TYPES,
@@ -607,6 +609,118 @@ class ViewerWidgetCommandsMixin:
         )
         self._set_context_hint("Box dimensions updated")
         self._refresh_hud()
+
+    def _edit_selected_position(self) -> None:
+        target = self._position_edit_target()
+        if target is None:
+            self._show_status("Select a body or sketch first")
+            return
+        item_id, target_label = target
+        center = self._shape_center(self._scene.get(item_id).shape)
+        if center is None:
+            self._show_status("Position unavailable")
+            return
+        x, ok = QInputDialog.getDouble(
+            self,
+            f"Set {target_label} Position",
+            "Center X (mm)",
+            center[0],
+            -1_000_000.0,
+            1_000_000.0,
+            2,
+        )
+        if not ok:
+            return
+        y, ok = QInputDialog.getDouble(
+            self,
+            f"Set {target_label} Position",
+            "Center Y (mm)",
+            center[1],
+            -1_000_000.0,
+            1_000_000.0,
+            2,
+        )
+        if not ok:
+            return
+        z, ok = QInputDialog.getDouble(
+            self,
+            f"Set {target_label} Position",
+            "Center Z (mm)",
+            center[2],
+            -1_000_000.0,
+            1_000_000.0,
+            2,
+        )
+        if not ok:
+            return
+        self._set_selected_position((x, y, z))
+
+    def _set_selected_position(
+        self,
+        target_center: tuple[float, float, float],
+    ) -> None:
+        target = self._position_edit_target()
+        if target is None:
+            self._show_status("Select a body or sketch first")
+            return
+        item_id, target_label = target
+        current_center = self._shape_center(self._scene.get(item_id).shape)
+        if current_center is None:
+            self._show_status("Position unavailable")
+            return
+        dx, dy, dz = (
+            target_component - current_component
+            for target_component, current_component in zip(
+                target_center, current_center
+            )
+        )
+        if abs(dx) < 1e-7 and abs(dy) < 1e-7 and abs(dz) < 1e-7:
+            self._show_status("Position unchanged")
+            return
+        scene_object = self._scene.get(item_id)
+        if is_sketch_object(scene_object.meta):
+            self._apply_sketch_move((item_id,), (dx, dy, dz))
+            selection = self._scene.selection()
+            if selection is not None and selection.item_id == item_id:
+                self._scene.set_selection(selection)
+        else:
+            apply_move_object(self._scene, item_id, dx, dy, dz)
+        self._hover_selection = None
+        if self._viewer.is_initialized:
+            self._viewer.display_scene(self._scene, fit=False)
+            selection = self._scene.selection()
+            if selection is not None and selection.item_id == item_id:
+                self._viewer.display_selection_marker(
+                    self._picker.subshape(
+                        selection.item_id,
+                        selection.kind,
+                        selection.index,
+                    ),
+                    self._scene.get(item_id).meta,
+                )
+        self._show_status(
+            f"{target_label} position set to "
+            f"X {target_center[0]:.2f}, Y {target_center[1]:.2f}, "
+            f"Z {target_center[2]:.2f}"
+        )
+        self._set_context_hint("Absolute center position updated")
+        self._refresh_hud()
+
+    def _position_edit_target(self) -> tuple[str, str] | None:
+        if len(self._scene.selection_refs()) > 1:
+            return None
+        selection = self._scene.selection()
+        item_id = (
+            selection.item_id if selection is not None else self._scene.active_item_id()
+        )
+        if item_id is None or item_id not in self._scene:
+            return None
+        meta = self._scene.get(item_id).meta
+        if is_sketch_object(meta):
+            return item_id, "Sketch"
+        if selection is not None and selection.kind != SelectionKind.OBJECT:
+            return None
+        return item_id, "Body"
 
     def _resize_box_along_selected_edge(
         self,

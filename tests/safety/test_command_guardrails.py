@@ -26,7 +26,7 @@ def test_face_selection_does_not_enable_whole_body_delete(qapp) -> None:
     state = widget.get_ui_state()
 
     assert state.selection_type == "face"
-    assert "extrude" in state.context_actions
+    assert "push_pull" in state.context_actions
     assert "start_sketch" in state.context_actions
     assert "delete_object" not in state.context_actions
     assert not main_window.actions["delete_object"].isEnabled()

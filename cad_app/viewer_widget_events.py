@@ -30,6 +30,7 @@ class ViewerWidgetEventMixin:
         self._position_context_hint()
         self._position_edge_dimension_editor()
         self._position_orientation_gizmo_overlay()
+        self._position_move_manipulator_overlay()
         self._position_selection_box_overlay()
         self._position_sketch_plane_chooser()
         self._position_tool_popover()
@@ -78,7 +79,7 @@ class ViewerWidgetEventMixin:
         self._viewer.display_scene(self._scene)
         self._viewer.update_view()
         if len(self._scene) == 0:
-            self._set_context_hint("Start: Sketch on the grid")
+            self._set_context_hint("Start: New Sketch, or import STEP from File")
         else:
             self._set_context_hint("Select geometry, then choose an available action")
         self._navigation.capture_home()
@@ -347,7 +348,7 @@ class ViewerWidgetEventMixin:
             if event.modifiers() & Qt.ShiftModifier:
                 self._extrude_active_top_face(-10.0)
             else:
-                self._begin_extrude_tool()
+                self._begin_push_pull_tool()
             return
         if event.key() == Qt.Key_G:
             self._begin_context_move_tool()

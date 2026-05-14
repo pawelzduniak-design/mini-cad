@@ -9,7 +9,9 @@ The detailed click/selection/menu matrix lives in
 
 ## Workspace
 
-- Left rail: category/mode selection only. Create/Box Body is hidden for now.
+- Left rail: modeling category/mode selection only. Empty projects open in
+  Sketch with New Sketch as the first action. File/import actions stay in the
+  main File menu and top/global chrome, not the left rail.
 - Context command panel: commands available for the current mode, selection,
   and active tool.
 - Viewport: dominant modeling area.
@@ -19,13 +21,13 @@ The detailed click/selection/menu matrix lives in
 
 - Object selection targets whole-body commands.
 - Face, edge, and vertex selection targets local topology commands.
-- Sketch profile selection targets profile commands such as sketch extrude,
-  new body, revolve, dimensions, edit sketch, move sketch, delete sketch, and
+- Sketch profile selection targets profile commands such as Push/Pull, new
+  body, revolve, dimensions, edit sketch, move sketch, delete sketch, and
   trim.
 - Ctrl-click and area selection can hold multiple selections for every
-  selection kind. Multi-body selection exposes only body Move commands, and the
-  move operation applies to every selected body. Multi-sketch-profile selection
-  exposes sketch Move, Sketch Extrude, New Body, and Delete Sketch.
+  selection kind. Multi-body selection exposes only body Move, and the move
+  operation applies to every selected body. Multi-sketch-profile selection
+  exposes sketch Move, Push/Pull, New Body, and Delete Sketch.
 - Sketch trim is segment-click based. Selecting a full sketch profile and
   activating trim must enter trim mode, not delete the whole profile.
 - Body transform commands require a real body. Sketch objects must never unlock
@@ -34,26 +36,29 @@ The detailed click/selection/menu matrix lives in
 - Body transform commands target bodies only. Sketch Move is a separate sketch
   command and updates the sketch metadata used by dimensions and trimming.
 - Boolean commands require an explicit target body and a separate tool body.
+  Set Boolean Target stays visible when a body exists so the Boolean category is
+  never an empty panel in a valid body workflow.
 
 ## Sketch
 
 - `start_sketch` starts a new independent sketch.
 - On empty selection, it uses the bottom/XY plane.
-- On selected planar body face, it uses that face as the workplane only.
+- On selected planar body face, it stores that body face as the feature host so
+  Push/Pull can either add material or subtract it from the active tool popover.
 - Sketch draw tools are unavailable until `start_sketch` has created an active
   sketch session.
-- It must not create `host_item_id` metadata.
+- Independent bottom-plane sketches must not create `host_item_id` metadata.
 - Sketch-created profiles and entities carry a stable `sketch_id`; edit, trim,
   and region rebuilds must stay scoped to that sketch, not every profile on the
   same workplane.
 - The visible face-plane label is `New Sketch (Face Plane)`.
 - `new_sketch` exists only as a hidden compatibility alias.
-- A browser-selected sketch can be an explicit edit target, but that is not
-  feature-host metadata.
+- A browser-selected sketch can be an explicit edit target and must not be
+  confused with a body-face feature host.
 
 ## Direct Modeling
 
-- `extrude`, `move_selection`, `move_selection_normal`, `remove_face`,
+- `push_pull`, `move_selection`, `move_selection_normal`, `remove_face`,
   `circle_boss`, and `circle_cut` are face-context commands.
 - `fillet`, `chamfer`, and supported edge move are edge-context commands.
 - `thread` is an edge-context command for circular edges only. It supports ISO
@@ -69,10 +74,10 @@ The detailed click/selection/menu matrix lives in
 
 ## Parametric History
 
-- Body-generating Sketch Extrude and Sketch Revolve create a feature tree with
+- Body-generating Push/Pull and Sketch Revolve create a feature tree with
   the sketch profile as the rebuild base.
-- Face Extrude, hosted Sketch Extrude, and Thread append editable feature steps
-  to the target body's feature tree.
+- Face Push/Pull, hosted sketch Push/Pull, and Thread append editable feature
+  steps to the target body's feature tree.
 - Feature steps store user parameters and a stable-enough topological reference:
   planar faces are remapped by center, normal, and area; circular thread edges
   are remapped by center, axis, and radius.

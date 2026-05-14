@@ -71,10 +71,12 @@ class ViewerWidgetMovePreviewMixin:
 
     @staticmethod
     def _move_overlay_label(session: MoveSession) -> str:
+        if session.tool == "sketch_extrude" and session.operation == "cut":
+            return f"Push/Pull Cut {abs(session .distance) :.2f} mm"
         if session.tool == "sketch_extrude" and session.operation == "new_body":
             return f"New Body {session .distance :.2f} mm"
         if session.tool in {"extrude", "sketch_extrude"}:
-            return f"Extrude {session .distance :.2f} mm"
+            return f"Push/Pull {session .distance :.2f} mm"
         if session.tool == "rotate":
             return f"Rotate {session .axis_name }: {session .distance :.2f} deg"
         if session.tool == "sketch_revolve":
@@ -99,16 +101,17 @@ class ViewerWidgetMovePreviewMixin:
             from OCP.TopoDS import TopoDS
 
             profile_item_ids = session.item_ids or (session.item_id,)
+            distance = self._sketch_extrude_session_distance(session)
             if len(profile_item_ids) == 1:
                 return extrude_profile(
                     TopoDS.Face_s(self._scene.get(profile_item_ids[0]).shape),
-                    session.distance,
+                    distance,
                 )
             return self._compound_shapes(
                 [
                     extrude_profile(
                         TopoDS.Face_s(self._scene.get(item_id).shape),
-                        session.distance,
+                        distance,
                     )
                     for item_id in profile_item_ids
                 ]
@@ -219,6 +222,14 @@ class ViewerWidgetMovePreviewMixin:
                 session.index,
             )
         return translated_shape(shape, dx, dy, dz)
+
+    @staticmethod
+    def _sketch_extrude_session_distance(session: MoveSession) -> float:
+        if session.operation == "cut":
+            return -abs(session.distance)
+        if session.operation in {"auto", "join"} and session.distance < 0:
+            return abs(session.distance)
+        return session.distance
 
     @staticmethod
     def _compound_shapes(shapes):

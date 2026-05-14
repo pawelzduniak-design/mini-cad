@@ -702,8 +702,22 @@ class TutorialSession:
         pixels: int,
         label: str,
     ) -> bool:
-        if not self.click_action(action_name, label):
+        axis_action_map = {
+            "move_object_x": ("move_object", "X"),
+            "move_object_y": ("move_object", "Y"),
+            "move_object_z": ("move_object", "Z"),
+            "move_sketch_x": ("move_sketch", "X"),
+            "move_sketch_y": ("move_sketch", "Y"),
+            "move_sketch_z": ("move_sketch", "Z"),
+            "move_selection_x": ("move_selection", "X"),
+            "move_selection_y": ("move_selection", "Y"),
+            "move_selection_z": ("move_selection", "Z"),
+        }
+        click_action, axis_name = axis_action_map.get(action_name, (action_name, None))
+        if not self.click_action(click_action, label):
             return False
+        if axis_name is not None:
+            self.widget._set_move_axis_from_manipulator(axis_name)
 
         direction = self._screen_direction_for_active_move(anchor, pixels)
         start = self._world_to_global(anchor)

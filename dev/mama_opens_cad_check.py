@@ -100,21 +100,15 @@ def main() -> int:
             _fail(f"Startup hint is not action-oriented: {state.hint_text!r}")
         _pass("Startup hint tells the user what to do first")
 
-        if "Select" not in widget._hud_labels["mode"].text():
-            _fail("Initial work mode is not visible as Select")
+        if "Sketch" not in widget._hud_labels["mode"].text():
+            _fail("Initial work mode is not visible as Sketch")
         _pass("Initial work mode is visible")
-        if "object" not in widget._hud_labels["axis"].text():
-            _fail("Initial selection mode is not visible as Object")
+        if "face" not in widget._hud_labels["axis"].text():
+            _fail("Initial selection mode is not visible as Face")
         _pass("Initial selection mode is visible")
-        if set(_command_action_names(widget)) != {
-            "select_object",
-            "select_face",
-            "select_edge",
-            "select_vertex",
-            "select_through",
-        }:
-            _fail("Select mode commands are not visible on startup")
-        _pass("Select mode commands are visible on startup")
+        if _command_action_names(widget) != ["start_sketch"]:
+            _fail("New Sketch is not visible on startup")
+        _pass("New Sketch is visible on startup")
 
         main_window.actions["category_sketch"].trigger()
         app.processEvents()

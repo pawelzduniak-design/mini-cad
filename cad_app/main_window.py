@@ -59,6 +59,8 @@ def create_main_window(viewer: Viewer, scene: Scene | None = None) -> MainWindow
     actions, commands_menu = build_main_window_actions(window, viewer_widget)
 
     build_main_window_layout(window, viewer_widget, actions, commands_menu)
+    if len(scene) == 0:
+        viewer_widget._set_active_category("sketch")
     return MainWindow(
         window=window,
         viewer_widget=viewer_widget,

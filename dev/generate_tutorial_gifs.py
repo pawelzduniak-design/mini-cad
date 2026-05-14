@@ -739,8 +739,8 @@ def generate_hat(out_dir: Path) -> Path:
             lambda: recorder.widget._active_category == "modify",
         )
         recorder.click_action_until(
-            "sketch_extrude",
-            "Choose Extrude Sketch",
+            "push_pull",
+            "Choose Push/Pull",
             lambda: recorder.widget._move_session is not None,
         )
         recorder.drag_active_tool_distance(6.0, "Drag in the viewport to pull the brim")
@@ -860,10 +860,11 @@ def generate_move_rotate(out_dir: Path) -> Path:
             body_id, "Click the body in the viewport"
         )
         recorder.click_action_until(
-            "move_object_x",
-            "Move the body along X",
+            "move_object",
+            "Move the body",
             lambda: recorder.widget._move_session is not None,
         )
+        recorder.widget._set_move_axis_from_manipulator("X")
         recorder.drag_active_tool_distance(34.0, "Drag to preview and commit the move")
         recorder.click_action_until(
             "rotate_body_z",
@@ -900,10 +901,11 @@ def generate_multi_body_move(out_dir: Path) -> Path:
             modifiers=Qt.KeyboardModifier.ControlModifier,
         )
         recorder.click_action_until(
-            "move_object_x",
+            "move_object",
             "Move both selected bodies",
             lambda: recorder.widget._move_session is not None,
         )
+        recorder.widget._set_move_axis_from_manipulator("X")
         recorder.drag_active_tool_distance(
             32.0, "One viewport drag translates both bodies"
         )

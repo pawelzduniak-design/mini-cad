@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from cad_app.commands import CommandError
+from cad_app.sketch import is_sketch_profile
 from cad_app.types import SelectionKind
 from cad_app.workplane import Workplane
 
@@ -85,6 +86,8 @@ class ViewerWidgetSketchPlaneMixin:
             f"new sketch on face plane {selection.index }",
             None,
         )
+        if not is_sketch_profile(self._scene.get(selection.item_id).meta):
+            self._active_workplane_host = (selection.item_id, selection.index)
         return True
 
     @staticmethod

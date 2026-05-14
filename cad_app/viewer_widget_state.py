@@ -30,12 +30,14 @@ BROWSER_COMMAND_ROLE = Qt.UserRole + 3
 class ViewerWidgetStateMixin(ViewerWidgetStateSnapshotMixin):
     def _set_selection_kind(self, kind: SelectionKind) -> None:
         self._selection_kind = kind
+        self._active_category = "select"
         self._hover_selection = None
         self._scene.set_selection(None)
         self._selection_source = None
         self._hide_edge_dimension_editor()
         if self._viewer.is_initialized:
             self._viewer.set_selection_kind(kind)
+        self._set_context_hint("Choose Object, Face, Edge, or Vertex selection mode")
         self._show_status(f"Selection: {kind .value }")
         self._refresh_hud()
         self._refresh_action_state()
@@ -97,10 +99,18 @@ class ViewerWidgetStateMixin(ViewerWidgetStateSnapshotMixin):
     def _set_boolean_target_from_context(self) -> None:
         item_id = self._selected_or_active_body_item_id()
         if item_id is None:
-            self._show_status("Select a body first")
-            return
+            body_item_ids = self._body_item_ids()
+            if len(body_item_ids) == 1:
+                item_id = body_item_ids[0]
+            else:
+                self._show_status("Select a body target first")
+                self._set_context_hint(
+                    "Boolean: select the target body, then select the second body"
+                )
+                return
         self._boolean_target_item_id = item_id
         self._show_status("Boolean target set")
+        self._set_context_hint("Boolean target set: select a second body to combine")
         self._refresh_action_state()
         LOGGER.info("Boolean target set item_id=%s", item_id)
 

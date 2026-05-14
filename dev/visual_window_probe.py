@@ -240,6 +240,7 @@ def _overlay_state(widget) -> dict[str, Any]:
         "_context_hint_overlay",
         "_sketch_plane_chooser",
         "_orientation_gizmo_overlay",
+        "_move_manipulator_overlay",
         "_selection_box_overlay",
         "_dimension_overlay",
     ):
@@ -387,8 +388,8 @@ def _capture_window(
             "context_actions": list(ui_state.context_actions),
         },
         "toolbars": {
-            "command": _toolbar_actions(window, "CommandToolbar"),
-            "category": _toolbar_actions(window, "CategoryToolbar"),
+            "command": _toolbar_actions(window, "context_tool_panel"),
+            "category": _toolbar_actions(window, "left_menu"),
         },
         "overlays": _overlay_state(widget),
         "regions": {

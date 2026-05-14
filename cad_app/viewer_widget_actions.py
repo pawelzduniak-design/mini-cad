@@ -12,6 +12,7 @@ from cad_app.sketch import (
     is_sketch_profile,
 )
 from cad_app.types import SelectionKind
+from cad_app.ui_chrome import assign_toolbar_button_object_names
 from cad_app.ui_menu import (
     BODY_ACTIONS,
     BOOLEAN_ACTIONS,
@@ -75,6 +76,19 @@ class ViewerWidgetActionsMixin:
                 f"Tool: New Body {self ._move_session .axis_name } "
                 f"{self ._move_session .distance :.2f}"
             )
+        if (
+            self._move_session.tool == "sketch_extrude"
+            and self._move_session.operation == "cut"
+        ):
+            return (
+                f"Tool: Push/Pull Cut {self ._move_session .axis_name } "
+                f"{abs(self ._move_session .distance) :.2f}"
+            )
+        if self._move_session.tool in {"extrude", "sketch_extrude"}:
+            return (
+                f"Tool: Push/Pull {self ._move_session .axis_name } "
+                f"{self ._move_session .distance :.2f}"
+            )
         if self._move_session.tool == "rotate":
             return (
                 f"Tool: Rotate {self ._move_session .axis_name } "
@@ -95,9 +109,7 @@ class ViewerWidgetActionsMixin:
         if self._move_session.tool == "chamfer":
             return f"Tool: Chamfer {self ._move_session .distance :.2f}"
         tool_names = {
-            "sketch_extrude": "Sketch Extrude",
             "sketch_move": "Sketch Move",
-            "extrude": "Extrude",
             "move": "Move",
         }
         tool_name = tool_names.get(
@@ -162,6 +174,11 @@ class ViewerWidgetActionsMixin:
         selected_profile = (
             not multi_selection and self._selected_item_is_sketch_profile()
         ) or multi_profile
+        hosted_selected_profile = (
+            selected_profile
+            and not multi_profile
+            and self._selected_sketch_profile_has_host()
+        )
         selected_sketch_object = (
             not multi_selection and self._selected_item_is_sketch_object()
         )
@@ -188,6 +205,23 @@ class ViewerWidgetActionsMixin:
             and selection is not None
             and not is_sketch_object(self._scene.get(selection.item_id).meta)
         )
+        active_body_without_selection = selection is None and active_body
+        body_transform_available = (
+            active_body_without_selection or selected_object_body or multi_body
+        )
+        single_body_transform_available = (
+            active_body_without_selection or selected_object_body
+        )
+        selected_position_editable = (
+            not tool_active
+            and not multi_selection
+            and (
+                selected_object_body
+                or active_body_without_selection
+                or selected_sketch_object
+                or (not multi_selection and self._selected_item_is_sketch_profile())
+            )
+        )
         view_move_supported = (
             not multi_selection and self._selection_supports_view_move(selection)
         )
@@ -204,6 +238,21 @@ class ViewerWidgetActionsMixin:
         move_object_action = self._actions.get("move_object")
         if move_object_action is not None:
             move_object_action.setText("Move")
+        edit_position_action = self._actions.get("edit_position")
+        if edit_position_action is not None:
+            if selected_sketch_object or (
+                not multi_selection and self._selected_item_is_sketch_profile()
+            ):
+                edit_position_action.setText("Set Sketch Position")
+            else:
+                edit_position_action.setText("Set Body Position")
+        if not hosted_selected_profile and not tool_active:
+            self._sketch_extrude_operation = "add"
+        sketch_cut_mode_action = self._actions.get("sketch_cut_mode")
+        if sketch_cut_mode_action is not None:
+            sketch_cut_mode_action.setChecked(
+                self._sketch_extrude_operation == "cut" and hosted_selected_profile
+            )
         start_sketch_action = self._actions.get("start_sketch")
         if start_sketch_action is not None:
             start_sketch_action.setText(
@@ -258,22 +307,19 @@ class ViewerWidgetActionsMixin:
             "save_project": True,
             "import_step": not tool_active,
             "add_box": not tool_active,
-            "export_step": active_body or selected_object_body,
+            "export_step": active_body_without_selection or selected_object_body,
             "delete_object": (
                 not tool_active
                 and not multi_body
-                and (selected_object_body or (selection is None and active_body))
+                and (selected_object_body or active_body_without_selection)
             ),
             "select_through": not tool_active,
-            "move_object": (active_body or selected_object_body or multi_body)
-            and not tool_active,
-            "move_object_x": (active_body or selected_object_body or multi_body)
-            and not tool_active,
-            "move_object_y": (active_body or selected_object_body or multi_body)
-            and not tool_active,
-            "move_object_z": (active_body or selected_object_body or multi_body)
-            and not tool_active,
+            "move_object": body_transform_available and not tool_active,
+            "move_object_x": False,
+            "move_object_y": False,
+            "move_object_z": False,
             "edit_box_dimensions": selected_box_dimensions_editable and not tool_active,
+            "edit_position": selected_position_editable,
             "move_selection": (
                 selection is not None
                 and selection.kind != SelectionKind.OBJECT
@@ -283,45 +329,25 @@ class ViewerWidgetActionsMixin:
             "move_selection_normal": (
                 selected_face and not selected_profile and not tool_active
             ),
-            "move_selection_x": (
-                selection is not None
-                and selection.kind != SelectionKind.OBJECT
-                and not selected_profile
-                and view_move_supported
-                and not tool_active
-            ),
-            "move_selection_y": (
-                selection is not None
-                and selection.kind != SelectionKind.OBJECT
-                and not selected_profile
-                and view_move_supported
-                and not tool_active
-            ),
-            "move_selection_z": (
-                selection is not None
-                and selection.kind != SelectionKind.OBJECT
-                and not selected_profile
-                and view_move_supported
-                and not tool_active
-            ),
-            "rotate_body": (active_body or selected_object_body)
+            "move_selection_x": False,
+            "move_selection_y": False,
+            "move_selection_z": False,
+            "rotate_body": single_body_transform_available
             and not multi_body
             and not tool_active,
-            "rotate_body_x": (active_body or selected_object_body)
+            "rotate_body_x": single_body_transform_available
             and not multi_body
             and not tool_active,
-            "rotate_body_y": (active_body or selected_object_body)
+            "rotate_body_y": single_body_transform_available
             and not multi_body
             and not tool_active,
-            "rotate_body_z": (active_body or selected_object_body)
+            "rotate_body_z": single_body_transform_available
             and not multi_body
             and not tool_active,
-            "mirror_body": (active_body or selected_object_body)
+            "mirror_body": single_body_transform_available
             and not multi_body
             and not tool_active,
-            "set_boolean_target": (
-                body_count >= 2 and boolean_tool_item_id is not None and not tool_active
-            ),
+            "set_boolean_target": body_count > 0 and not tool_active,
             "clear_boolean_target": boolean_target_item_id is not None,
             "boolean_union": boolean_ready,
             "boolean_subtract": boolean_ready,
@@ -349,11 +375,13 @@ class ViewerWidgetActionsMixin:
                 and self._selected_sketch_profile_dimensions_editable()
             ),
             "move_sketch": selected_sketch_geometry and not tool_active,
-            "move_sketch_x": selected_sketch_geometry and not tool_active,
-            "move_sketch_y": selected_sketch_geometry and not tool_active,
-            "move_sketch_z": selected_sketch_geometry and not tool_active,
+            "move_sketch_x": False,
+            "move_sketch_y": False,
+            "move_sketch_z": False,
+            "push_pull": (selected_face or selected_profile) and not tool_active,
             "sketch_extrude": selected_profile and not tool_active,
             "sketch_new_body": selected_profile and not tool_active,
+            "sketch_cut_mode": False,
             "sketch_revolve": selected_profile
             and not multi_profile
             and not tool_active,
@@ -406,6 +434,21 @@ class ViewerWidgetActionsMixin:
         if selection is None:
             return False
         return is_sketch_profile(self._scene.get(selection.item_id).meta)
+
+    def _selected_sketch_profile_has_host(self) -> bool:
+        refs = self._scene.selection_refs()
+        if len(refs) != 1:
+            return False
+        selection = refs[0]
+        if selection.item_id not in self._scene:
+            return False
+        meta = self._scene.get(selection.item_id).meta
+        host_item_id = meta.get("host_item_id")
+        return (
+            is_sketch_profile(meta)
+            and isinstance(host_item_id, str)
+            and (host_item_id in self._scene)
+        )
 
     def _selected_sketch_profile_refs(self) -> tuple:
         return tuple(
@@ -500,48 +543,34 @@ class ViewerWidgetActionsMixin:
         if self._active_category == "create":
             return [("Create", list(CREATE_ACTIONS))]
 
-        boolean_target_item_id = self._valid_boolean_target_item_id()
-        boolean_tool_item_id = self._selected_or_active_body_item_id()
         boolean_section = list(BOOLEAN_ACTIONS)
-        active_boolean_section = ["set_boolean_target"]
-        if boolean_target_item_id is not None:
-            active_boolean_section.append("clear_boolean_target")
-        if (
-            boolean_target_item_id is not None
-            and boolean_tool_item_id is not None
-            and boolean_tool_item_id != boolean_target_item_id
-        ):
-            active_boolean_section.extend(
-                ["boolean_union", "boolean_subtract", "boolean_intersect"]
-            )
         if self._active_category == "boolean":
             return [("Boolean", boolean_section)]
         if self._active_category == "transform":
             if len(selections) > 1 and self._selected_body_count() == len(selections):
                 return [("Bodies", list(MULTI_BODY_ACTIONS))]
-            if len(self._body_item_ids()) == 0:
-                return [
-                    (
-                        "Body",
-                        list(BODY_ACTIONS),
-                    )
-                ]
             if (
                 selection is not None
                 and selection.kind != SelectionKind.OBJECT
                 and not self._selected_item_is_sketch_profile()
             ):
+                return []
+            if selection is not None and selection.kind == SelectionKind.OBJECT:
                 return [
                     (
                         "Body",
                         list(BODY_ACTIONS),
-                    )
+                    ),
+                ]
+            if self._scene.active_item_id() is not None and len(self._body_item_ids()):
+                return [
+                    (
+                        "Body",
+                        list(BODY_ACTIONS),
+                    ),
                 ]
             return [
-                (
-                    "Body",
-                    list(BODY_ACTIONS) + active_boolean_section,
-                ),
+                ("Body", list(BODY_ACTIONS)),
             ]
         if self._active_category == "view":
             return [
@@ -565,7 +594,7 @@ class ViewerWidgetActionsMixin:
             return [
                 (
                     "Body",
-                    list(BODY_ACTIONS) + active_boolean_section,
+                    list(BODY_ACTIONS),
                 )
             ]
         if selection.kind == SelectionKind.FACE:
@@ -583,11 +612,11 @@ class ViewerWidgetActionsMixin:
         if self._move_session is None:
             return None
         if self._move_session.tool == "extrude":
-            return "extrude"
+            return "push_pull"
         if self._move_session.tool == "sketch_extrude":
             if self._move_session.operation == "new_body":
                 return "sketch_new_body"
-            return "sketch_extrude"
+            return "push_pull"
         if self._move_session.tool == "move":
             if self._move_session.target_kind == "object":
                 return "move_object"
@@ -627,6 +656,7 @@ class ViewerWidgetActionsMixin:
             for action in enabled_actions:
                 self._command_menu.addAction(action)
                 self._command_toolbar.addAction(action)
+        assign_toolbar_button_object_names(self._command_toolbar)
         self._command_toolbar.setVisible(True)
 
     def _make_command_section_label(self, text: str):

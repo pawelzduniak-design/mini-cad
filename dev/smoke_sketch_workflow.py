@@ -231,9 +231,18 @@ def _test_selection_modes(log: SmokeResult) -> None:
             action.shortcut().toString() == shortcut,
             f"Shortcut {shortcut} -> {action.text()}",
         )
+        action.trigger()
+        state = main_window.viewer_widget.get_ui_state()
+        _require(
+            log,
+            state.work_mode == "select"
+            and state.selection_mode == action_name.removeprefix("select_")
+            and state.selection_type == "none",
+            f"{action.text()} switches to Select mode",
+        )
     _require(
         log,
-        main_window.viewer_widget._selection_kind == SelectionKind.OBJECT,
+        main_window.viewer_widget._selection_kind == SelectionKind.VERTEX,
         "Current selection mode visible in state",
     )
     main_window.window.close()
