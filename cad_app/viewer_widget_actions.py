@@ -17,12 +17,9 @@ from cad_app.ui_menu import (
     BODY_ACTIONS,
     BOOLEAN_ACTIONS,
     CATEGORY_DEFS,
-    CREATE_ACTIONS,
     EDGE_MODIFY_ACTIONS,
     EMPTY_MODIFY_SECTIONS,
     FACE_MODIFY_ACTIONS,
-    FILE_ACTIONS,
-    MEASURE_ACTIONS,
     MULTI_BODY_ACTIONS,
     MULTI_PROFILE_ACTIONS,
     PROFILE_ACTIONS,
@@ -31,7 +28,6 @@ from cad_app.ui_menu import (
     SKETCH_OBJECT_ACTIONS,
     SKETCH_START_ACTIONS,
     VERTEX_MODIFY_ACTIONS,
-    VIEW_ACTIONS,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -81,12 +77,12 @@ class ViewerWidgetActionsMixin:
             and self._move_session.operation == "cut"
         ):
             return (
-                f"Tool: Push/Pull Cut {self ._move_session .axis_name } "
+                f"Tool: Extrude Cut {self ._move_session .axis_name } "
                 f"{abs(self ._move_session .distance) :.2f}"
             )
         if self._move_session.tool in {"extrude", "sketch_extrude"}:
             return (
-                f"Tool: Push/Pull {self ._move_session .axis_name } "
+                f"Tool: Extrude {self ._move_session .axis_name } "
                 f"{self ._move_session .distance :.2f}"
             )
         if self._move_session.tool == "rotate":
@@ -108,8 +104,12 @@ class ViewerWidgetActionsMixin:
             return f"Tool: Fillet R {self ._move_session .distance :.2f}"
         if self._move_session.tool == "chamfer":
             return f"Tool: Chamfer {self ._move_session .distance :.2f}"
+        if self._move_session.tool == "fillet_chamfer":
+            value = self._move_session.distance
+            tool_name = "Fillet" if value >= 0.0 else "Chamfer"
+            return f"Tool: {tool_name} {abs(value) :.2f}"
         tool_names = {
-            "sketch_move": "Sketch Move",
+            "sketch_move": "Move",
             "move": "Move",
         }
         tool_name = tool_names.get(
@@ -206,12 +206,44 @@ class ViewerWidgetActionsMixin:
             and not is_sketch_object(self._scene.get(selection.item_id).meta)
         )
         active_body_without_selection = selection is None and active_body
-        body_transform_available = (
-            active_body_without_selection or selected_object_body or multi_body
+        body_transform_available = selected_object_body or multi_body
+        single_body_transform_available = selected_object_body
+        # Rotate accepts an optional "pivot" subshape: exactly one body
+        # plus exactly one vertex / edge / face means rotate around that
+        # subshape's centre instead of the body's bounding-box centre.
+        selected_body_refs = self._selected_body_refs()
+        selected_subshape_refs = tuple(
+            ref
+            for ref in selections
+            if ref.kind
+            in {SelectionKind.VERTEX, SelectionKind.EDGE, SelectionKind.FACE}
         )
-        single_body_transform_available = (
-            active_body_without_selection or selected_object_body
+        body_with_pivot = (
+            len(selected_body_refs) == 1
+            and len(selected_subshape_refs) == 1
+            and len(selections) == 2
         )
+        rotate_eligible = (
+            single_body_transform_available and not multi_body
+        ) or body_with_pivot
+        # Revolve accepts an optional construction line (open
+        # line_segments entity) as the axis. Pair: one profile + one
+        # line entity.
+        construction_line_refs = tuple(
+            ref
+            for ref in selections
+            if ref.item_id in self._scene
+            and self._scene.get(ref.item_id).meta.get("kind") == "sketch_entity"
+            and self._scene.get(ref.item_id).meta.get("profile") == "line_segments"
+        )
+        profile_with_axis_line = (
+            selected_profile_count == 1
+            and len(construction_line_refs) == 1
+            and len(selections) == 2
+        )
+        revolve_eligible = (
+            selected_profile and not multi_profile
+        ) or profile_with_axis_line
         selected_position_editable = (
             not tool_active
             and not multi_selection
@@ -225,6 +257,15 @@ class ViewerWidgetActionsMixin:
         view_move_supported = (
             not multi_selection and self._selection_supports_view_move(selection)
         )
+        face_normal_move_supported = (
+            selected_face
+            and not selected_profile
+            and self._selection_supports_face_normal_move(selection)
+        )
+        local_move_supported = view_move_supported or face_normal_move_supported
+        move_action = self._actions.get("move")
+        if move_action is not None:
+            move_action.setText("Move")
         move_selection_action = self._actions.get("move_selection")
         if move_selection_action is not None:
             if selected_face and not selected_profile:
@@ -302,9 +343,15 @@ class ViewerWidgetActionsMixin:
         )
         enabled_by_context = {
             **category_enabled_by_action,
-            "undo": self._scene.can_undo() and not tool_active,
-            "redo": self._scene.can_redo() and not tool_active,
-            "save_project": True,
+            # Undo / redo are allowed while a sketch session is active so a
+            # beginner can step back through committed sketch profiles
+            # (Ctrl+Z right after drawing a rectangle should work). They
+            # stay disabled only while a move/extrude/fillet drag is open
+            # because cancelling that mid-tool would leave dangling state.
+            "undo": self._scene.can_undo() and self._move_session is None,
+            "redo": self._scene.can_redo() and self._move_session is None,
+            "new_project": True,
+            "save_project": False,
             "import_step": not tool_active,
             "add_box": not tool_active,
             "export_step": active_body_without_selection or selected_object_body,
@@ -314,41 +361,43 @@ class ViewerWidgetActionsMixin:
                 and (selected_object_body or active_body_without_selection)
             ),
             "select_through": not tool_active,
-            "move_object": body_transform_available and not tool_active,
+            "move": (
+                (
+                    body_transform_available
+                    or selected_sketch_geometry
+                    or selected_profile
+                    or (
+                        selection is not None
+                        and selection.kind != SelectionKind.OBJECT
+                        and local_move_supported
+                    )
+                )
+                and not tool_active
+                and boolean_target_item_id is None
+            ),
+            "move_object": False,
             "move_object_x": False,
             "move_object_y": False,
             "move_object_z": False,
             "edit_box_dimensions": selected_box_dimensions_editable and not tool_active,
             "edit_position": selected_position_editable,
-            "move_selection": (
-                selection is not None
-                and selection.kind != SelectionKind.OBJECT
-                and view_move_supported
-                and not tool_active
-            ),
-            "move_selection_normal": (
-                selected_face and not selected_profile and not tool_active
-            ),
+            "move_selection": False,
+            "move_selection_normal": False,
             "move_selection_x": False,
             "move_selection_y": False,
             "move_selection_z": False,
-            "rotate_body": single_body_transform_available
-            and not multi_body
-            and not tool_active,
-            "rotate_body_x": single_body_transform_available
-            and not multi_body
-            and not tool_active,
-            "rotate_body_y": single_body_transform_available
-            and not multi_body
-            and not tool_active,
-            "rotate_body_z": single_body_transform_available
-            and not multi_body
-            and not tool_active,
-            "mirror_body": single_body_transform_available
-            and not multi_body
-            and not tool_active,
-            "set_boolean_target": body_count > 0 and not tool_active,
+            "rotate_body": rotate_eligible
+            and not tool_active
+            and boolean_target_item_id is None,
+            "rotate_body_x": False,
+            "rotate_body_y": False,
+            "rotate_body_z": False,
+            "mirror_body": False,
+            "set_boolean_target": selected_object_body
+            and not tool_active
+            and boolean_target_item_id is None,
             "clear_boolean_target": boolean_target_item_id is not None,
+            "cancel_boolean": boolean_target_item_id is not None,
             "boolean_union": boolean_ready,
             "boolean_subtract": boolean_ready,
             "boolean_intersect": boolean_ready,
@@ -357,6 +406,8 @@ class ViewerWidgetActionsMixin:
             "sketch_rectangle_tool": sketch_tools_available,
             "sketch_line_tool": sketch_tools_available,
             "sketch_arc_tool": sketch_tools_available,
+            "sketch_circle2_tool": sketch_tools_available,
+            "sketch_center_radius_tool": sketch_tools_available,
             "sketch_rectangle3_tool": sketch_tools_available,
             "sketch_center_rectangle_tool": sketch_tools_available,
             "sketch_circle_tool": sketch_tools_available,
@@ -374,42 +425,41 @@ class ViewerWidgetActionsMixin:
                 and self._move_session is None
                 and self._selected_sketch_profile_dimensions_editable()
             ),
-            "move_sketch": selected_sketch_geometry and not tool_active,
+            "move_sketch": False,
             "move_sketch_x": False,
             "move_sketch_y": False,
             "move_sketch_z": False,
-            "push_pull": (selected_face or selected_profile) and not tool_active,
-            "sketch_extrude": selected_profile and not tool_active,
-            "sketch_new_body": selected_profile and not tool_active,
+            "push_pull": False,
+            # Extrude / Sketch New Body / Sketch Revolve are the natural way
+            # out of a sketch session: _begin_extrude_tool calls
+            # _finish_sketch_for_modeling_command internally. Blocking these
+            # actions while a sketch is open forces beginners into an extra
+            # "Finish Sketch" click that should not be required.
+            "extrude": (selected_face or selected_profile)
+            and self._move_session is None,
+            "sketch_extrude": False,
+            "sketch_new_body": selected_profile and self._move_session is None,
             "sketch_cut_mode": False,
-            "sketch_revolve": selected_profile
-            and not multi_profile
-            and not tool_active,
-            "sketch_revolve_x": (
-                selected_profile and not multi_profile and not tool_active
-            ),
-            "sketch_revolve_y": (
-                selected_profile and not multi_profile and not tool_active
-            ),
-            "sketch_revolve_z": (
-                selected_profile and not multi_profile and not tool_active
-            ),
+            "sketch_revolve": revolve_eligible and self._move_session is None,
+            "sketch_revolve_x": False,
+            "sketch_revolve_y": False,
+            "sketch_revolve_z": False,
             "delete_sketch": selected_sketch_geometry and not tool_active,
-            "extrude": selected_face and not selected_profile and not tool_active,
             "extrude_reverse": (
                 selected_face and not selected_profile and not tool_active
             ),
-            "circle_boss": (selected_face and not selected_profile and not tool_active),
-            "circle_cut": (selected_face and not selected_profile and not tool_active),
+            "circle_boss": False,
+            "circle_cut": False,
             "offset_face": False,
             "remove_face": (selected_face and not selected_profile and not tool_active),
-            "fillet": selected_edge and not tool_active,
-            "chamfer": selected_edge and not tool_active,
+            "fillet_chamfer": selected_edge and not tool_active,
+            "fillet": False,
+            "chamfer": False,
             "thread": (
                 selected_edge and self._selected_edge_is_circular() and not tool_active
             ),
             "edit_edge_length": selected_edge_length_editable and not tool_active,
-            "measure_distance": selected_edge and not tool_active,
+            "measure_distance": False,
             "measure_angle": False,
             "measure_radius": False,
         }
@@ -480,6 +530,16 @@ class ViewerWidgetActionsMixin:
         return is_sketch_object(self._scene.get(selection.item_id).meta)
 
     def _context_command_sections(self) -> list[tuple[str, list[str]]]:
+        def select_sections(
+            sections: list[tuple[str, list[str]]] | None = None,
+        ) -> list[tuple[str, list[str]]]:
+            if self._active_category != "select":
+                return sections or []
+            return [
+                ("Selection Mode", list(SELECT_ACTIONS)),
+                *(sections or []),
+            ]
+
         if self._sketch_session is not None:
             sketch_actions = list(SKETCH_DRAW_ACTIONS)
             sections = [
@@ -501,8 +561,28 @@ class ViewerWidgetActionsMixin:
 
         selection = self._scene.selection()
         selections = self._scene.selection_refs()
-        if self._active_category == "select":
-            return [("Selection Mode", list(SELECT_ACTIONS))]
+        boolean_target_item_id = self._valid_boolean_target_item_id()
+        if boolean_target_item_id is not None:
+            boolean_tool_item_id = self._selected_or_active_body_item_id()
+            boolean_ready = (
+                boolean_tool_item_id is not None
+                and boolean_tool_item_id != boolean_target_item_id
+            )
+            if boolean_ready:
+                return [
+                    (
+                        "Boolean",
+                        [
+                            "boolean_union",
+                            "boolean_subtract",
+                            "boolean_intersect",
+                            "cancel_boolean",
+                        ],
+                    )
+                ]
+            return select_sections([("Boolean", ["cancel_boolean"])])
+        if self._active_category == "select" and not selections:
+            return select_sections()
         if self._active_category == "sketch":
             if self._sketch_session is None:
                 return [
@@ -514,123 +594,71 @@ class ViewerWidgetActionsMixin:
             ]
         if len(selections) > 1:
             if self._selected_sketch_profile_count() == len(selections):
-                return [("Profiles", list(MULTI_PROFILE_ACTIONS))]
+                return select_sections([("Profiles", list(MULTI_PROFILE_ACTIONS))])
             if self._selected_body_count() == len(selections):
-                return [("Bodies", list(MULTI_BODY_ACTIONS))]
-            return []
+                return select_sections(
+                    [("Bodies", [*MULTI_BODY_ACTIONS, *BOOLEAN_ACTIONS])]
+                )
+            return select_sections()
         if (
             selection is not None
             and self._sketch_session is None
             and self._selected_item_is_sketch_profile()
         ):
-            return [
-                (
-                    "Profile",
-                    list(PROFILE_ACTIONS),
-                ),
-            ]
+            return select_sections([("Profile", list(PROFILE_ACTIONS))])
         if (
             selection is not None
             and self._sketch_session is None
             and self._selected_item_is_sketch_object()
         ):
-            return [
-                (
-                    "Sketch",
-                    list(SKETCH_OBJECT_ACTIONS),
-                ),
-            ]
-        if self._active_category == "create":
-            return [("Create", list(CREATE_ACTIONS))]
-
-        boolean_section = list(BOOLEAN_ACTIONS)
-        if self._active_category == "boolean":
-            return [("Boolean", boolean_section)]
-        if self._active_category == "transform":
-            if len(selections) > 1 and self._selected_body_count() == len(selections):
-                return [("Bodies", list(MULTI_BODY_ACTIONS))]
-            if (
-                selection is not None
-                and selection.kind != SelectionKind.OBJECT
-                and not self._selected_item_is_sketch_profile()
-            ):
-                return []
-            if selection is not None and selection.kind == SelectionKind.OBJECT:
-                return [
-                    (
-                        "Body",
-                        list(BODY_ACTIONS),
-                    ),
-                ]
-            if self._scene.active_item_id() is not None and len(self._body_item_ids()):
-                return [
-                    (
-                        "Body",
-                        list(BODY_ACTIONS),
-                    ),
-                ]
-            return [
-                ("Body", list(BODY_ACTIONS)),
-            ]
-        if self._active_category == "view":
-            return [
-                (
-                    "View",
-                    list(VIEW_ACTIONS),
-                )
-            ]
-        if self._active_category == "file":
-            return [("File", list(FILE_ACTIONS))]
-        if self._active_category == "measure":
-            return [("Measure", list(MEASURE_ACTIONS))]
+            return select_sections([("Sketch", list(SKETCH_OBJECT_ACTIONS))])
         if selection is None:
-            return [
-                (section_name, list(action_names))
-                for section_name, action_names in EMPTY_MODIFY_SECTIONS
-            ]
+            return select_sections(
+                [
+                    (section_name, list(action_names))
+                    for section_name, action_names in EMPTY_MODIFY_SECTIONS
+                ]
+            )
         if selection.kind == SelectionKind.OBJECT:
             if len(selections) > 1 and self._selected_body_count() == len(selections):
-                return [("Bodies", list(MULTI_BODY_ACTIONS))]
-            return [
-                (
-                    "Body",
-                    list(BODY_ACTIONS),
+                return select_sections(
+                    [("Bodies", [*MULTI_BODY_ACTIONS, *BOOLEAN_ACTIONS])]
                 )
-            ]
+            return select_sections([("Body", [*BODY_ACTIONS, *BOOLEAN_ACTIONS])])
         if selection.kind == SelectionKind.FACE:
-            return [("Face", list(FACE_MODIFY_ACTIONS))]
+            return select_sections([("Face", list(FACE_MODIFY_ACTIONS))])
         if selection.kind == SelectionKind.EDGE:
             edge_actions = list(EDGE_MODIFY_ACTIONS)
             if self._selected_edge_is_circular():
-                edge_actions.insert(3, "thread")
-            return [("Edge", edge_actions)]
+                edge_actions.append("thread")
+            return select_sections([("Edge", edge_actions)])
         if selection.kind == SelectionKind.VERTEX:
-            return [("Vertex", list(VERTEX_MODIFY_ACTIONS))]
-        return []
+            return select_sections([("Vertex", list(VERTEX_MODIFY_ACTIONS))])
+        return select_sections()
 
     def _active_command_action_name(self) -> str | None:
         if self._move_session is None:
             return None
         if self._move_session.tool == "extrude":
-            return "push_pull"
+            return "extrude"
         if self._move_session.tool == "sketch_extrude":
             if self._move_session.operation == "new_body":
                 return "sketch_new_body"
-            return "push_pull"
+            return "extrude"
         if self._move_session.tool == "move":
-            if self._move_session.target_kind == "object":
-                return "move_object"
-            return "move_selection"
+            return "move"
         if self._move_session.tool == "sketch_move":
-            return "move_sketch"
+            return "move"
         if self._move_session.tool == "rotate":
             return "rotate_body"
         if self._move_session.tool == "sketch_revolve":
             return "sketch_revolve"
         if self._move_session.tool == "fillet":
-            return "fillet"
+            return "fillet_chamfer"
         if self._move_session.tool == "chamfer":
-            return "chamfer"
+            return "fillet_chamfer"
+        if self._move_session.tool == "fillet_chamfer":
+            return "fillet_chamfer"
         return None
 
     def _refresh_command_surface(self) -> None:

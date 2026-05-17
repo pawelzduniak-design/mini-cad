@@ -233,13 +233,34 @@ def circular_edge_parameters(
 def thread_default_length(
     shape: TopoDS_Shape,
     axis: tuple[float, float, float],
+    *,
+    edge_radius: float | None = None,
 ) -> float:
-    """Return a practical default thread length from shape bounds."""
+    """Return a practical default thread length.
+
+    The raw projected span of the body along the thread axis is a useful
+    upper bound, but on its own it is a terrible default for a beginner.
+    On a tall body with a shallow hole the dialog used to propose the
+    full body height, producing thread coils dangling far past the hole.
+
+    Rule of thumb for fasteners: thread length about 2.5 x major
+    diameter (so 5 x edge radius). When we know the edge radius, cap
+    the default at that rule. Always cap at the actual body span as
+    well, so the thread never escapes the solid.
+    """
     min_projection, max_projection = _shape_projection_bounds(shape, axis)
     span = max_projection - min_projection
     if span <= 1e-7:
-        return 20.0
-    return span
+        span = 20.0
+
+    if edge_radius is not None and edge_radius > 0:
+        recommended = max(2.0, edge_radius * 5.0)
+        return float(min(span, recommended))
+
+    # Without an edge radius we still cap at a generic 30 mm to keep the
+    # default usable on large bodies; the dialog can still let the user
+    # raise it manually for through-bolts.
+    return float(min(span, 30.0))
 
 
 def thread_edge(

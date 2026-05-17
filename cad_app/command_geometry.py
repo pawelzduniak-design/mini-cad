@@ -200,6 +200,61 @@ def _points_are_coplanar(
     return all(abs(_dot(normal, _sub(point, base))) <= tolerance for point in points)
 
 
+def _point_bounds(
+    points: list[tuple[float, float, float]],
+) -> tuple[float, float, float, float, float, float]:
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    zs = [point[2] for point in points]
+    return min(xs), min(ys), min(zs), max(xs), max(ys), max(zs)
+
+
+def _shape_optimal_bounds(
+    shape: TopoDS_Shape,
+) -> tuple[float, float, float, float, float, float]:
+    from OCP.Bnd import Bnd_Box
+    from OCP.BRepBndLib import BRepBndLib
+
+    bounds = Bnd_Box()
+    BRepBndLib.AddOptimal_s(shape, bounds)
+    if bounds.IsVoid():
+        raise UnsupportedTopologyError("Move rebuild produced empty bounds.")
+    return bounds.Get()
+
+
+def _assert_rebuild_bounds_match_vertices(
+    shape: TopoDS_Shape,
+    expected_points: list[tuple[float, float, float]],
+) -> None:
+    expected = _point_bounds(expected_points)
+    actual = _shape_optimal_bounds(shape)
+    span = max(
+        expected[3] - expected[0],
+        expected[4] - expected[1],
+        expected[5] - expected[2],
+        1.0,
+    )
+    tolerance = max(1e-4, span * 1e-6)
+
+    for axis, actual_min, expected_min, actual_max, expected_max in zip(
+        ("X", "Y", "Z"),
+        actual[:3],
+        expected[:3],
+        actual[3:],
+        expected[3:],
+    ):
+        if (
+            actual_min < expected_min - tolerance
+            or actual_min > expected_min + tolerance
+            or actual_max < expected_max - tolerance
+            or actual_max > expected_max + tolerance
+        ):
+            raise UnsupportedTopologyError(
+                "Move rebuild produced geometry outside the moved vertices "
+                f"on {axis}."
+            )
+
+
 def _make_wire_from_points(
     points: list[tuple[float, float, float]],
     target_normal: tuple[float, float, float],
@@ -380,17 +435,17 @@ def _move_vertices_via_face_rebuild(
     *,
     allow_nonplanar_faces: bool,
 ) -> TopoDS_Shape:
-    from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeSolid, BRepBuilderAPI_Sewing
-    from OCP.TopoDS import TopoDS
-
-    face_map = Picker.indexed_map(shape, SelectionKind.FACE)
-    vertex_map = Picker.indexed_map(shape, SelectionKind.VERTEX)
-
     old_points = _shape_vertex_points(shape)
     new_points = [
         (x + dx, y + dy, z + dz) if idx in moved_vertex_indexes else (x, y, z)
         for idx, (x, y, z) in enumerate(old_points, start=1)
     ]
+
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeSolid, BRepBuilderAPI_Sewing
+    from OCP.TopoDS import TopoDS
+
+    face_map = Picker.indexed_map(shape, SelectionKind.FACE)
+    vertex_map = Picker.indexed_map(shape, SelectionKind.VERTEX)
 
     sewing = BRepBuilderAPI_Sewing(1e-7)
 
@@ -439,7 +494,9 @@ def _move_vertices_via_face_rebuild(
     solid = solid_builder.Solid()
     try:
         validate_shape(solid)
-        return cleanup_shape(solid)
+        cleaned = cleanup_shape(solid)
+        _assert_rebuild_bounds_match_vertices(cleaned, new_points)
+        return cleaned
     except InvalidShapeError as exc:
         raise UnsupportedTopologyError(
             "Vertex/edge move supports only rebuildable planar-faced solids "
