@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import dataclass
 
 from cad_app.commands import CommandError
 from cad_app.sketch import (
@@ -27,6 +28,37 @@ from cad_app.sketch_graph import (
 from cad_app.ui_sessions import SketchSession
 
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class SketchTerminationAudit:
+    """Records what happened to in-progress sketch geometry on session end.
+
+    Every session-end path (Finish Sketch, Enter, tool switch, category
+    switch, Cancel) must funnel through ``_drain_pending_sketch_geometry``
+    so the policy is auditable. A populated ``committed_item_id`` means
+    the pending geometry was preserved as a sketch_entity (open polyline
+    construction reference). ``discarded=True`` means the caller asked
+    for an intentional cancel.
+    """
+
+    reason: str
+    tool: str
+    pending_point_count: int
+    committed_item_id: str | None = None
+    discarded: bool = False
+
+    def describe(self) -> str:
+        if self.committed_item_id is not None:
+            return (
+                f"reason={self.reason} tool={self.tool} "
+                f"points={self.pending_point_count} "
+                f"committed_id={self.committed_item_id[:8]}"
+            )
+        return (
+            f"reason={self.reason} tool={self.tool} "
+            f"points={self.pending_point_count} discarded={self.discarded}"
+        )
 
 
 class ViewerWidgetSketchToolMixin:
@@ -53,10 +85,87 @@ class ViewerWidgetSketchToolMixin:
         if session.tool == "rectangle_3_point":
             self._handle_rectangle_three_point_click(session, uv, x, y)
             return
-        if session.tool in {"center_rectangle", "circle"}:
+        if session.tool in {"center_rectangle", "circle", "circle_diameter"}:
             self._handle_two_point_profile_click(session, uv, x, y)
             return
         self._show_status(f"Unsupported sketch tool: {session .tool }")
+
+    def _drain_pending_sketch_geometry(
+        self,
+        session: SketchSession,
+        *,
+        preserve: bool,
+        reason: str,
+    ) -> SketchTerminationAudit:
+        """Single funnel for "what survives a session end" decisions.
+
+        Centralises the rule: any pending open line chain (tool=="line"
+        with >= 2 distinct points and not closed) is preserved as a
+        construction sketch_entity when ``preserve`` is True. Other
+        tools have no in-flight geometry to drain (arc commits per
+        third click; circle / rectangle / trim never leave pending
+        committable points). The returned audit lets callers log
+        precisely what survived — useful when a beginner expected
+        their lines to stay and they did not.
+        """
+        audit = SketchTerminationAudit(
+            reason=reason,
+            tool=session.tool,
+            pending_point_count=len(session.points),
+        )
+        if not preserve:
+            audit.discarded = bool(session.points)
+            LOGGER.info("Sketch geometry drained: %s", audit.describe())
+            return audit
+        if session.tool == "line":
+            item_id = self._commit_open_polyline_as_entity(session)
+            if item_id is not None:
+                audit.committed_item_id = item_id
+        LOGGER.info("Sketch geometry drained: %s", audit.describe())
+        return audit
+
+    def _commit_open_polyline_as_entity(self, session: SketchSession) -> str | None:
+        """Persist an in-progress open line chain as a sketch_entity so it
+        survives Finish Sketch, tool switches, and clicks that miss snap
+        targets.
+
+        Beginners often draw construction lines as references for later
+        Revolve axes, Mirror planes, or as snap targets. Discarding them
+        whenever the polyline does not close itself made the tool feel
+        unforgiving. We commit anything with at least two distinct points
+        as an open polyline entity; the user can still delete it later
+        from the browser.
+        """
+        if not session.points or len(session.points) < 2:
+            return None
+        if is_closed_polyline(session.points):
+            return None
+        try:
+            preview = make_polyline_preview(session.workplane, session.points)
+        except (CommandError, ValueError):
+            return None
+        segments = polyline_segments(session.points)
+        if not segments:
+            return None
+        points_uv = [(float(u), float(v)) for u, v in session.points]
+        item_id = self._add_sketch_entity(
+            preview,
+            {
+                **self._sketch_profile_meta(
+                    profile="line_segments",
+                    segments=len(segments),
+                    workplane=session.label,
+                ),
+                **segments_meta(segments),
+                "points_uv": points_uv,
+            },
+        )
+        LOGGER.info(
+            "Open polyline kept as sketch entity item_id=%s segments=%d",
+            item_id,
+            len(segments),
+        )
+        return item_id
 
     def _handle_line_click(
         self,
@@ -78,7 +187,7 @@ class ViewerWidgetSketchToolMixin:
             self._show_status("Line: next point")
             self._refresh_hud()
             return
-        next_uv = self._closed_line_point(session.points, uv)
+        next_uv = self._closed_line_point(session, uv, x, y)
         if next_uv is None:
             next_uv = uv
         if math.dist(session.points[-1], next_uv) < 1e-7:
@@ -101,15 +210,31 @@ class ViewerWidgetSketchToolMixin:
         self._show_status("Line segment added")
         self._refresh_hud()
 
-    @staticmethod
     def _closed_line_point(
-        points: list[tuple[float, float]],
+        self,
+        session: SketchSession,
         uv: tuple[float, float],
-        tolerance: float = 1.5,
+        x: int,
+        y: int,
+        uv_tolerance: float = 1.5,
+        screen_tolerance_px: float = 14.0,
     ) -> tuple[float, float] | None:
+        points = session.points
         if len(points) < 3:
             return None
-        if math.dist(points[0], uv) <= tolerance:
+        if math.dist(points[0], uv) <= uv_tolerance:
+            return points[0]
+        if not self._viewer.is_initialized:
+            return None
+        try:
+            start_world = self._workplane_point(session.workplane, points[0])
+            start_x, start_y = self._viewer.view.Convert(*start_world)
+            scale = self.devicePixelRatioF() or 1.0
+            start_widget = (float(start_x) / scale, float(start_y) / scale)
+        except (RuntimeError, ValueError):
+            LOGGER.debug("Line close screen snap failed", exc_info=True)
+            return None
+        if math.dist(start_widget, (float(x), float(y))) <= screen_tolerance_px:
             return points[0]
         return None
 
@@ -245,7 +370,31 @@ class ViewerWidgetSketchToolMixin:
             profile = make_polyline_profile(session.workplane, session.points)
         except (CommandError, ValueError) as exc:
             LOGGER.warning("Polyline profile failed: %s", exc, exc_info=True)
-            self._show_status("Polyline profile failed")
+            # Self-intersecting / degenerate loops can't become a face,
+            # but the work the user did should not vanish. Drop the
+            # closing duplicate and keep what they drew as a
+            # construction line_segments entity so it can be edited,
+            # trimmed, or used as a reference instead of disappearing.
+            open_points = (
+                list(session.points[:-1])
+                if (
+                    len(session.points) >= 2 and session.points[0] == session.points[-1]
+                )
+                else list(session.points)
+            )
+            saved_points = list(session.points)
+            session.points[:] = open_points
+            self._commit_open_polyline_as_entity(session)
+            session.points[:] = saved_points
+            self._show_status("Polyline self-intersects: kept as construction line")
+            self._set_context_hint(
+                "Self-intersecting polyline cannot close into a face. "
+                "Lines kept as a reference entity."
+            )
+            self._continue_sketch_after_profile(
+                session,
+                "Polyline kept as reference",
+            )
             return
         item_id = self._add_sketch_profile(
             profile,
@@ -327,6 +476,11 @@ class ViewerWidgetSketchToolMixin:
         self._remember_sketch_snap_point(session, session.points[0])
         self._remember_sketch_snap_point(session, session.points[1])
         session.points.clear()
+        # Drop the in-progress preview line/arc marker now that the
+        # entity is committed — otherwise it lingers on top of the new
+        # arc and the user sees the freshly-drawn shape "disappear"
+        # under the stale preview until they click somewhere else.
+        self._viewer.clear_preview_marker()
         session.drag_dimensions = f"Arc R {radius :.1f}"
         self._show_dimension_overlay(f"Arc R: {radius :.2f} mm", x, y)
         self._set_context_hint("Arc created - choose another sketch tool or continue")
@@ -434,7 +588,7 @@ class ViewerWidgetSketchToolMixin:
             self._show_status("Sketch too small")
             return
         profile_meta = self._sketch_profile_meta(
-            profile=session.tool,
+            profile=self._sketch_profile_kind_for_tool(session.tool),
             workplane=session.label,
             **self._sketch_dimension_meta(session.tool, start_uv, uv),
             **self._sketch_segment_meta(session.tool, start_uv, uv),

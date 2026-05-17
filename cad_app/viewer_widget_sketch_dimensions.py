@@ -149,6 +149,7 @@ class ViewerWidgetSketchDimensionsMixin(ViewerWidgetSketchDimensionUIMixin):
             "line",
             "arc",
             "circle",
+            "circle_diameter",
             "rectangle_3_point",
             "center_rectangle",
             "trim",
@@ -164,6 +165,16 @@ class ViewerWidgetSketchDimensionsMixin(ViewerWidgetSketchDimensionUIMixin):
             self._show_status("Start New Sketch before choosing draw tools")
             self._refresh_action_state()
             return
+        # Keep any in-progress open line chain as a sketch_entity before
+        # we discard the points list. This is how beginners build
+        # construction references. The drain helper centralises this
+        # rule across every session-end path.
+        if clear_points and self._sketch_session.points:
+            self._drain_pending_sketch_geometry(
+                self._sketch_session,
+                preserve=True,
+                reason="tool_switch",
+            )
         self._sketch_session.tool = tool
         self._sketch_session.start_uv = None
         self._sketch_session.drag_start_screen = None
@@ -184,6 +195,8 @@ class ViewerWidgetSketchDimensionsMixin(ViewerWidgetSketchDimensionUIMixin):
         for action_name, action_tool in {
             "sketch_line_tool": "line",
             "sketch_arc_tool": "arc",
+            "sketch_circle2_tool": "circle_diameter",
+            "sketch_center_radius_tool": "circle",
             "sketch_circle_tool": "circle",
             "sketch_rectangle3_tool": "rectangle_3_point",
             "sketch_center_rectangle_tool": "center_rectangle",
@@ -200,6 +213,7 @@ class ViewerWidgetSketchDimensionsMixin(ViewerWidgetSketchDimensionUIMixin):
             "line": "Line: click points, Enter/Esc to finish",
             "arc": "Arc: click start, click end, click bend point",
             "circle": "Circle: click center, set radius, click to confirm",
+            "circle_diameter": "Circle 2-Point: click diameter start and end",
             "rectangle_3_point": "Rectangle 3 Point: base points, then height",
             "center_rectangle": "Center Rectangle: click center, drag size",
             "trim": "Trim: click directly on a sketch segment",
@@ -301,6 +315,31 @@ class ViewerWidgetSketchDimensionsMixin(ViewerWidgetSketchDimensionUIMixin):
             self._hide_dimension_overlay()
             self._show_status("Sketch cancelled")
             return
+        if session.tool == "line" and session.drag_moved:
+            if not session.points and session.start_uv is not None:
+                self._handle_sketch_click(session, session.start_uv, x, y)
+            if self._sketch_session is session:
+                self._handle_sketch_click(session, uv, x, y)
+            session.start_uv = None
+            session.drag_start_screen = None
+            session.drag_moved = False
+            session.drag_end_uv = None
+            return
+        if session.tool == "arc" and session.drag_moved:
+            # Arc needs three clicks (start, end, bend). A drag lets the
+            # user sweep the chord — start_uv becomes click #1, drag end
+            # becomes click #2. They still place the bend with a third
+            # click. Without this branch a drag would fall through to
+            # the two-point profile path that doesn't accept arcs.
+            if not session.points and session.start_uv is not None:
+                self._handle_sketch_click(session, session.start_uv, x, y)
+            if self._sketch_session is session:
+                self._handle_sketch_click(session, uv, x, y)
+            session.start_uv = None
+            session.drag_start_screen = None
+            session.drag_moved = False
+            session.drag_end_uv = None
+            return
         if not session.drag_moved:
             self._handle_sketch_click(session, uv, x, y)
             return
@@ -319,7 +358,7 @@ class ViewerWidgetSketchDimensionsMixin(ViewerWidgetSketchDimensionUIMixin):
             self._show_status("Sketch too small")
             return
         profile_meta = self._sketch_profile_meta(
-            profile=session.tool,
+            profile=self._sketch_profile_kind_for_tool(session.tool),
             workplane=session.label,
             **self._sketch_dimension_meta(
                 session.tool,
@@ -368,7 +407,10 @@ class ViewerWidgetSketchDimensionsMixin(ViewerWidgetSketchDimensionUIMixin):
     ) -> tuple[float, float]:
         if session.tool == "line" and session.points:
             return self._snap_radial_uv(session.points[-1], uv)
-        if session.tool == "circle" and session.start_uv is not None:
+        if (
+            session.tool in {"circle", "circle_diameter"}
+            and session.start_uv is not None
+        ):
             return self._snap_radial_uv(session.start_uv, uv)
         if session.tool in {"center_rectangle", "rectangle"}:
             if session.start_uv is None:
@@ -472,6 +514,13 @@ class ViewerWidgetSketchDimensionsMixin(ViewerWidgetSketchDimensionUIMixin):
                 (end_uv[0] - start_uv[0]) ** 2 + (end_uv[1] - start_uv[1]) ** 2
             ) ** 0.5
             return make_circle_profile_at(session.workplane, start_uv, radius)
+        if session.tool == "circle_diameter":
+            center_uv = (
+                (start_uv[0] + end_uv[0]) / 2.0,
+                (start_uv[1] + end_uv[1]) / 2.0,
+            )
+            radius = math.dist(start_uv, end_uv) / 2.0
+            return make_circle_profile_at(session.workplane, center_uv, radius)
         raise ValueError(f"Unsupported sketch tool: {session .tool }")
 
     def _sketch_preview_shape(

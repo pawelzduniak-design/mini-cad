@@ -15,6 +15,12 @@ from cad_app.viewer_widget_sketch_dimension_resize import (
 
 class ViewerWidgetSketchDimensionUIMixin(ViewerWidgetSketchDimensionResizeMixin):
     @staticmethod
+    def _sketch_profile_kind_for_tool(tool: str) -> str:
+        if tool in {"circle", "circle_diameter"}:
+            return "circle"
+        return tool
+
+    @staticmethod
     def _sketch_overlay_label(
         tool: str,
         start_uv: tuple[float, float],
@@ -27,6 +33,9 @@ class ViewerWidgetSketchDimensionUIMixin(ViewerWidgetSketchDimensionResizeMixin)
         if tool == "circle":
             radius = math.dist(start_uv, end_uv)
             return f"R: {radius :.2f} mm"
+        if tool == "circle_diameter":
+            diameter = math.dist(start_uv, end_uv)
+            return f"D: {diameter :.2f} mm, R: {diameter / 2.0 :.2f} mm"
         return _sketch_dimension_label(tool, start_uv, end_uv)
 
     @staticmethod
@@ -56,6 +65,12 @@ class ViewerWidgetSketchDimensionUIMixin(ViewerWidgetSketchDimensionResizeMixin)
                 "radius": math.dist(start_uv, end_uv),
                 "center_u": start_uv[0],
                 "center_v": start_uv[1],
+            }
+        if tool == "circle_diameter":
+            return {
+                "radius": math.dist(start_uv, end_uv) / 2.0,
+                "center_u": (start_uv[0] + end_uv[0]) / 2.0,
+                "center_v": (start_uv[1] + end_uv[1]) / 2.0,
             }
         return {}
 

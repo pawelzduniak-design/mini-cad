@@ -359,6 +359,19 @@ class ViewerWidgetSketchOperationsMixin(
             status="Sketch cancelled",
             context_hint="Sketch cancelled - Select mode",
             category="select",
+            preserve_pending=False,
+        )
+
+    def _sketch_session_is_empty(self) -> bool:
+        session = self._sketch_session
+        if session is None:
+            return True
+        return not (
+            session.profile_ids
+            or session.points
+            or session.start_uv is not None
+            or session.drag_moved
+            or session.drag_end_uv is not None
         )
 
     def _finish_sketch_session(
@@ -367,9 +380,19 @@ class ViewerWidgetSketchOperationsMixin(
         status: str = "Sketch finished",
         context_hint: str = "Sketch finished - select a profile or model face",
         category: str = "select",
+        preserve_pending: bool = True,
     ) -> None:
         if self._sketch_session is None:
             return
+        # Drain pending in-progress geometry (typically an open line
+        # chain). The user expects their lines to remain unless they
+        # explicitly cancel — preserve_pending=False is reserved for
+        # the Esc/Cancel path and intentional discards.
+        self._drain_pending_sketch_geometry(
+            self._sketch_session,
+            preserve=preserve_pending,
+            reason="finish_session",
+        )
         self._sketch_session = None
         self._active_category = category
         self._selection_kind = SelectionKind.FACE
@@ -381,6 +404,11 @@ class ViewerWidgetSketchOperationsMixin(
             self._viewer.show_sketch_geometry = True
             self._viewer.display_scene(self._scene, fit=False)
             self._viewer.set_selection_kind(SelectionKind.FACE)
+            # Return to the camera the user had BEFORE the sketch was
+            # opened (snapshotted by view_workplane). If they did not
+            # enter a workplane, leave the camera alone — orbit/pan
+            # they did during the sketch is respected.
+            self._navigation.restore_pre_sketch_view()
         self._set_context_hint(context_hint)
         self._show_status(status)
         self._refresh_hud()
@@ -394,6 +422,11 @@ class ViewerWidgetSketchOperationsMixin(
         if self._sketch_session is None:
             return
         if self._sketch_session.points:
+            self._drain_pending_sketch_geometry(
+                self._sketch_session,
+                preserve=True,
+                reason="finish_sequence",
+            )
             self._sketch_session.points.clear()
             self._sketch_session.start_uv = None
             self._sketch_session.drag_end_uv = None
@@ -730,6 +763,29 @@ class ViewerWidgetSketchOperationsMixin(
         if not sources:
             return False
         result = trim_segment_graph(sources, uv, max_distance=max_distance)
+        if self._sketch_session is not None:
+            fallback_sources = self._sketch_graph_sources(
+                workplane,
+                restrict_to_active_sketch=False,
+            )
+            if len(fallback_sources) > len(sources):
+                fallback_result = trim_segment_graph(
+                    fallback_sources,
+                    uv,
+                    max_distance=max_distance,
+                )
+                if fallback_result is not None and (
+                    result is None
+                    or (
+                        not result.open_segments
+                        and not result.loop_segments
+                        and (
+                            bool(fallback_result.open_segments)
+                            or bool(fallback_result.loop_segments)
+                        )
+                    )
+                ):
+                    result = fallback_result
         if result is None:
             return False
         try:
@@ -751,6 +807,8 @@ class ViewerWidgetSketchOperationsMixin(
     def _sketch_graph_sources(
         self,
         workplane: Workplane,
+        *,
+        restrict_to_active_sketch: bool = True,
     ) -> tuple[SketchGraphSource, ...]:
         sources: list[SketchGraphSource] = []
         active_sketch_id = (
@@ -759,7 +817,7 @@ class ViewerWidgetSketchOperationsMixin(
         for item in self._scene:
             if not is_sketch_object(item.meta):
                 continue
-            if not self._sketch_item_matches_sketch_id(
+            if restrict_to_active_sketch and not self._sketch_item_matches_sketch_id(
                 item.item_id,
                 item.meta,
                 active_sketch_id,
@@ -904,6 +962,46 @@ class ViewerWidgetSketchOperationsMixin(
                 new_entity_ids.append(item_id)
                 changed_item_ids.append(item_id)
 
+            # Split crossing open entities into separate atomic-line
+            # entities so each remaining arm of an intersection is
+            # selectable on its own. To preserve identity (selection
+            # tests rely on the entity's item_id surviving), keep the
+            # first atomic on the original item_id and emit any extra
+            # atomics as new entities.
+            def _atomic_shape(atomic):
+                if atomic.kind == "line":
+                    return make_polyline_preview(workplane, [atomic.start, atomic.end])
+                return make_curve_preview(
+                    workplane, curve_specs_from_edges((atomic,))[0]
+                )
+
+            def _atomic_meta(atomic):
+                return {
+                    "kind": SKETCH_ENTITY_META_KIND,
+                    **self._sketch_graph_meta(
+                        workplane,
+                        ("line_segment" if atomic.kind == "line" else "arc_segment"),
+                        (atomic,),
+                    ),
+                }
+
+            for crossing_id, atomics in result.crossing_split_sources:
+                if crossing_id not in self._scene or not atomics:
+                    continue
+                first = atomics[0]
+                self._scene.replace_shape(
+                    crossing_id,
+                    _atomic_shape(first),
+                    meta=_atomic_meta(first),
+                )
+                changed_item_ids.append(crossing_id)
+                for atomic in atomics[1:]:
+                    item_id = self._scene.add_shape(
+                        _atomic_shape(atomic), meta=_atomic_meta(atomic)
+                    )
+                    new_entity_ids.append(item_id)
+                    changed_item_ids.append(item_id)
+
             if new_profile_ids:
                 self._scene.set_active_item(new_profile_ids[0])
                 self._scene.set_selection(
@@ -979,7 +1077,7 @@ class ViewerWidgetSketchOperationsMixin(
         profile: str,
         edges,
     ) -> dict[str, object]:
-        return {
+        meta: dict[str, object] = {
             "profile": profile,
             "workplane": self._active_workplane_label,
             "display_normal": self._workplane_normal_tuple(workplane),
@@ -988,6 +1086,14 @@ class ViewerWidgetSketchOperationsMixin(
             **self._workplane_frame_meta(workplane),
             **graph_meta_from_edges(tuple(edges)),
         }
+        # Carry the active session's sketch_id so subsequent trim
+        # operations still recognise this item as part of the same
+        # sketch (without this, _sketch_item_matches_sketch_id falls
+        # back to comparing item_id with sketch_id and the item gets
+        # filtered out, making the user's sketch "split into two").
+        if self._sketch_session is not None and self._sketch_session.sketch_id:
+            meta["sketch_id"] = self._sketch_session.sketch_id
+        return meta
 
     def _trim_sketch_item(self, item_id: str) -> bool:
         if item_id not in self._scene:
@@ -1111,9 +1217,17 @@ class ViewerWidgetSketchOperationsMixin(
                     index=0,
                 )
             )
+        # Selection now refers to an OBJECT body. If the widget is still
+        # in FACE pick mode the user's first click on the new body will
+        # demote selection back to a face and the Body context panel
+        # (with Rotate Body) vanishes. Align the pick mode with the
+        # actual selection kind so Move + Rotate stay reachable.
+        self._selection_kind = SelectionKind.OBJECT
+        if self._viewer.is_initialized:
+            self._viewer.set_selection_kind(SelectionKind.OBJECT)
+        self._active_category = "transform"
         if new_body and host_available:
             self._boolean_target_item_id = str(host_item_id)
-            self._active_category = "transform"
         return result
 
     def _apply_multi_sketch_extrude(
@@ -1136,6 +1250,42 @@ class ViewerWidgetSketchOperationsMixin(
                 from OCP.TopoDS import TopoDS
 
                 profile_face = TopoDS.Face_s(scene_object.shape)
+                host_item_id = scene_object.meta.get("host_item_id")
+                host_available = (
+                    isinstance(host_item_id, str) and host_item_id in self._scene
+                )
+                if host_available and not new_body:
+                    # Hosted profile: fuse/cut into the host body and drop
+                    # the profile, matching single-profile sketch extrude.
+                    host_object = self._scene.get(host_item_id)
+                    step = capture_sketch_feature_step(profile_face, distance)
+                    result = apply_profile_feature(
+                        host_object.shape,
+                        profile_face,
+                        distance,
+                    )
+                    self._scene.replace_shape(
+                        host_item_id,
+                        result,
+                        meta={
+                            **append_feature_step(
+                                host_object.meta,
+                                host_object.shape,
+                                step,
+                            ),
+                            "last_sketch_feature": scene_object.meta.get("profile"),
+                        },
+                    )
+                    self._scene.remove(item_id)
+                    results.append(result)
+                    body_selections.append(
+                        SelectionRef(
+                            item_id=host_item_id,
+                            kind=SelectionKind.OBJECT,
+                            index=0,
+                        )
+                    )
+                    continue
                 result = extrude_profile(profile_face, distance)
                 source = "sketch_new_body" if new_body else "sketch_extrude"
                 meta = create_feature_history(
@@ -1161,7 +1311,20 @@ class ViewerWidgetSketchOperationsMixin(
                         index=0,
                     )
                 )
-            self._scene.set_active_item(item_ids[0])
+            # Pick whichever item from body_selections still survives in the
+            # scene as the new active item (the first profile may have been
+            # removed if it was hosted).
+            if body_selections:
+                active_id = body_selections[0].item_id
+                if active_id in self._scene:
+                    self._scene.set_active_item(active_id)
             self._scene.set_selections(tuple(body_selections))
         self._active_category = "transform"
+        # Same reasoning as single-profile extrude: align pick mode with
+        # the OBJECT selection so the user's next click does not demote
+        # the body to a face and hide Rotate Body.
+        if body_selections:
+            self._selection_kind = SelectionKind.OBJECT
+            if self._viewer.is_initialized:
+                self._viewer.set_selection_kind(SelectionKind.OBJECT)
         return tuple(results)

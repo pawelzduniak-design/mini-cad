@@ -54,6 +54,11 @@ class SketchTrimGraphResult:
     open_segments: tuple[AtomicSketchSegment, ...]
     source_item_ids: tuple[str, ...]
     loop_segments: tuple[tuple[AtomicSketchSegment, ...], ...] = ()
+    # Other open entities (sketch_entity kind) that share an endpoint
+    # with the removed atomic and should be split into separate
+    # atomic-line entities so each "arm" of the intersection becomes
+    # selectable on its own.
+    crossing_split_sources: tuple[tuple[str, tuple[AtomicSketchSegment, ...]], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -323,6 +328,44 @@ def trim_segment_graph(
     target_sources = _trim_target_sources(sources, nearest)
     if not target_sources:
         return None
+    # Also split any source that shares an endpoint with the removed
+    # atomic (i.e. an entity crossing through this intersection): in
+    # the UI the user expects "click one arm of a cross, the other arm
+    # also breaks into separate pieces at the intersection point" so
+    # each surviving arm becomes its own selectable entity rather than
+    # a single unsegmented line that still passes through the deleted
+    # spot.
+    primary_ids = {source.item_id for source in target_sources}
+    removed_endpoints = (nearest.start, nearest.end)
+    crossing_split_sources: list[tuple[str, tuple[AtomicSketchSegment, ...]]] = []
+    for source in sources:
+        if source.item_id in primary_ids:
+            continue
+        # Only split _open_ sketch entities at the intersection.
+        # Closed profile regions produced by the regionization pipeline
+        # (base / intersection / tool) already share endpoints with
+        # everything else and must not be re-emitted as atomics — that
+        # would dissolve the regions the user explicitly built.
+        if source.meta.get("kind") != "sketch_entity":
+            continue
+        source_atomics: list[AtomicSketchSegment] = []
+        for segment in atomic_segments:
+            if source.item_id not in _atomic_segment_owner_ids(sources, segment):
+                continue
+            source_atomics.append(_retarget_atomic_source(segment, source.item_id))
+        if not source_atomics:
+            continue
+        # Only split when the open entity actually has more than one
+        # atomic — single-atomic entities have no crossing to dissolve.
+        if len(source_atomics) < 2:
+            continue
+        touches_removed = any(
+            _same_point(endpoint, atomic.start) or _same_point(endpoint, atomic.end)
+            for atomic in source_atomics
+            for endpoint in removed_endpoints
+        )
+        if touches_removed:
+            crossing_split_sources.append((source.item_id, tuple(source_atomics)))
     removed_key = _atomic_geometry_key(nearest)
     loop_segments: list[tuple[AtomicSketchSegment, ...]] = []
     open_segments: list[AtomicSketchSegment] = []
@@ -347,12 +390,56 @@ def trim_segment_graph(
             for segment in remaining
             if _atomic_geometry_key(segment) not in loop_edges
         )
+    # Fallback for regionized sketches with multiple primary target
+    # sources (typical for 3+ overlapping circles or rect+circle
+    # arrangements where regionization gives the user many adjacent
+    # closed regions sharing edges): if the per-source walk left any
+    # edges open, try forming closures by mixing them with atomics from
+    # OTHER (non-target) sources. This recovers regions whose boundary
+    # crosses several entities — the "after trim only one of seven
+    # regions remained extrudable" symptom in the user's log.
+    #
+    # We skip this fallback for single-target trims (the canonical
+    # "two circles" workflow) where preserving an open arc_segment is
+    # the documented, tested behaviour.
+    if open_segments and len(target_sources) > 1:
+        already_in_loops = {
+            _atomic_geometry_key(edge) for loop in loop_segments for edge in loop
+        }
+        non_target_atomics = [
+            _retarget_atomic_source(segment, "")
+            for segment in atomic_segments
+            if _atomic_geometry_key(segment) != removed_key
+            and _atomic_geometry_key(segment) not in already_in_loops
+            and not any(
+                source.item_id in _atomic_segment_owner_ids(sources, segment)
+                for source in target_sources
+            )
+        ]
+        if non_target_atomics:
+            combined = list(open_segments) + non_target_atomics
+            extra_loops = _positive_face_loops(combined)
+            extra_loop_keys: set[tuple] = set()
+            for loop in extra_loops:
+                if all(
+                    _atomic_geometry_key(edge) not in already_in_loops for edge in loop
+                ):
+                    loop_segments.append(loop)
+                    for edge in loop:
+                        extra_loop_keys.add(_atomic_geometry_key(edge))
+            if extra_loop_keys:
+                open_segments = [
+                    seg
+                    for seg in open_segments
+                    if _atomic_geometry_key(seg) not in extra_loop_keys
+                ]
     return SketchTrimGraphResult(
         removed_segment=nearest,
         loops=tuple(tuple(edge.start for edge in loop) for loop in loop_segments),
         open_segments=tuple(open_segments),
         source_item_ids=tuple(source.item_id for source in target_sources),
         loop_segments=tuple(loop_segments),
+        crossing_split_sources=tuple(crossing_split_sources),
     )
 
 

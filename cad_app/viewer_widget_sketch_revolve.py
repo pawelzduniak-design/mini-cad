@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
+import math
 
 from cad_app.commands import CommandError
 from cad_app.feature_history import (
     capture_sketch_revolve_step,
     create_feature_history,
 )
-from cad_app.sketch import is_sketch_profile
+from cad_app.sketch import SKETCH_ENTITY_META_KIND, is_sketch_profile
 from cad_app.sketch_features import revolve_profile
 from cad_app.types import SelectionKind, SelectionRef
 from cad_app.ui_sessions import MoveSession
@@ -24,15 +25,28 @@ class ViewerWidgetSketchRevolveMixin:
     def _begin_sketch_revolve_tool_on_axis(self, axis_name: str) -> None:
         if not self._finish_sketch_for_modeling_command():
             return
-        selection = self._scene.selection()
-        if selection is None:
+        # Find the profile to revolve and an optional construction line
+        # entity in the selection so the user can pick a custom axis
+        # (e.g. a line they drew as a reference) instead of being locked
+        # to world X / Y / Z.
+        refs = self._scene.selection_refs()
+        profile_refs = [
+            r
+            for r in refs
+            if r.item_id in self._scene
+            and is_sketch_profile(self._scene.get(r.item_id).meta)
+        ]
+        if not profile_refs:
             self._show_status("Select a sketch profile first")
             return
+        selection = profile_refs[0]
         scene_object = self._scene.get(selection.item_id)
-        if not is_sketch_profile(scene_object.meta):
-            self._show_status("Select a sketch profile first")
-            return
-        axis_point, axis = self._sketch_revolve_axis(scene_object.meta, axis_name)
+        line_axis = self._custom_revolve_axis_from_selection(refs)
+        if line_axis is not None:
+            axis_point, axis = line_axis
+            axis_name = "Custom"
+        else:
+            axis_point, axis = self._sketch_revolve_axis(scene_object.meta, axis_name)
         self._move_axis_name = axis_name
         self._move_axis = axis
         if hasattr(self, "_orientation_gizmo_overlay"):
@@ -66,6 +80,39 @@ class ViewerWidgetSketchRevolveMixin:
             selection.item_id,
             axis_name,
         )
+
+    def _custom_revolve_axis_from_selection(
+        self, refs
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
+        """If exactly one open line entity (a construction line) is in
+        the selection, return its first and last point as the revolve
+        axis. Otherwise return None and let the caller use X/Y/Z."""
+        line_refs = [
+            r
+            for r in refs
+            if r.item_id in self._scene
+            and self._scene.get(r.item_id).meta.get("kind") == SKETCH_ENTITY_META_KIND
+            and self._scene.get(r.item_id).meta.get("profile") == "line_segments"
+        ]
+        if len(line_refs) != 1:
+            return None
+        meta = self._scene.get(line_refs[0].item_id).meta
+        points_uv = meta.get("points_uv")
+        if not isinstance(points_uv, (list, tuple)) or len(points_uv) < 2:
+            return None
+        workplane = self._workplane_from_sketch_meta(meta)
+        start_uv = points_uv[0]
+        end_uv = points_uv[-1]
+        start = self._workplane_point(
+            workplane, (float(start_uv[0]), float(start_uv[1]))
+        )
+        end = self._workplane_point(workplane, (float(end_uv[0]), float(end_uv[1])))
+        dx, dy, dz = end[0] - start[0], end[1] - start[1], end[2] - start[2]
+        length = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if length < 1e-7:
+            return None
+        axis = (dx / length, dy / length, dz / length)
+        return start, axis
 
     def _sketch_revolve_axis(
         self,
