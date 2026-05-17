@@ -12,6 +12,7 @@ venv/
 logs/
 out/
 test-results/
+test_artifacts/
 docs/tutorials/gifs/
 docs/tutorials/gifs_*/
 docs/tutorials/verification/
@@ -21,3 +22,9 @@ Thumbs.db
 *.swp
 *.swo
 *~
+# Local Claude Code settings (per-user, not for sharing)
+.claude/
+# Ad-hoc debug screenshots dropped at repo root
+/blad.png
+/*_screenshot.png
+/screenshot_*.png

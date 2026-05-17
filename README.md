@@ -68,5 +68,4 @@ Useful tasks:
 
 ## License
 
-No public license has been selected yet. Add a `LICENSE` file before publishing
-as open source.
+MIT — see [LICENSE](LICENSE).
