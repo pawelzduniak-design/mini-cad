@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QPoint, QRect
 from PySide6.QtWidgets import QFileDialog, QInputDialog
 
 from cad_app.commands import (
@@ -269,6 +269,7 @@ class ViewerWidgetCommandsMixin:
         default_length = thread_default_length(
             self._scene.get(selection.item_id).shape,
             axis,
+            edge_radius=radius,
         )
         pitch, ok = QInputDialog.getDouble(
             self,
@@ -379,6 +380,7 @@ class ViewerWidgetCommandsMixin:
         if not self._viewer.is_initialized or not self._selected_edge_length_editable():
             self._hide_edge_dimension_editor()
             return
+        self._viewer.clear_dimension_label(redraw=False)
         self._edge_dimension_editor_selection = selection
         self._show_inline_dimension_editors(
             [
@@ -482,6 +484,35 @@ class ViewerWidgetCommandsMixin:
         max_y = max(0, self.height() - editor.height() - 8)
         x = min(max(8, x), max_x)
         y = min(max(8, y), max_y)
+        candidate = QRect(x, y, editor.width(), editor.height())
+        obstacles = [
+            rect.adjusted(-8, -8, 8, 8)
+            for widget_name in (
+                "_move_manipulator_overlay",
+                "_orientation_gizmo_overlay",
+                "_tool_popover",
+                "_context_hint_overlay",
+            )
+            if (rect := self._child_rect_in_viewport(getattr(self, widget_name, None)))
+            is not None
+        ]
+        if any(candidate.intersects(obstacle) for obstacle in obstacles):
+            offsets = (
+                (int(offset[0]), int(offset[1])),
+                (-editor.width() - 18, int(offset[1])),
+                (int(offset[0]), -editor.height() - 18),
+                (-editor.width() - 18, -editor.height() - 18),
+                (int(offset[0]), 44),
+            )
+            for offset_x, offset_y in offsets:
+                alt_x = int(round(view_x / scale)) + offset_x
+                alt_y = int(round(view_y / scale)) + offset_y
+                alt_x = min(max(8, alt_x), max_x)
+                alt_y = min(max(8, alt_y), max_y)
+                alternative = QRect(alt_x, alt_y, editor.width(), editor.height())
+                if not any(alternative.intersects(obstacle) for obstacle in obstacles):
+                    x, y = alt_x, alt_y
+                    break
         editor.move(self.mapToGlobal(QPoint(x, y)))
 
     def _commit_inline_dimension_editor(self, key: str) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from cad_app.ui_menu import (
     BODY_ACTIONS,
+    BOOLEAN_ACTIONS,
     EDGE_MODIFY_ACTIONS,
     FACE_MODIFY_ACTIONS,
     SELECT_ACTIONS,
@@ -18,15 +19,18 @@ LAYOUT_REGIONS = (
     "bottom_status_bar",
 )
 
-AVAILABLE_FACE_ACTIONS = tuple(
-    action_name for action_name in FACE_MODIFY_ACTIONS if action_name != "offset_face"
-)
+AVAILABLE_FACE_ACTIONS = FACE_MODIFY_ACTIONS
+SELECT_VERTEX_ACTIONS = (*SELECT_ACTIONS, *VERTEX_MODIFY_ACTIONS)
+SELECT_EDGE_ACTIONS = (*SELECT_ACTIONS, *EDGE_MODIFY_ACTIONS)
+SELECT_FACE_ACTIONS = (*SELECT_ACTIONS, *AVAILABLE_FACE_ACTIONS)
+SELECT_BODY_ACTIONS = (*SELECT_ACTIONS, *BODY_ACTIONS, "set_boolean_target")
 
 _CONTEXT_TOOL_ACTIONS = tuple(
     dict.fromkeys(
         (
             *SELECT_ACTIONS,
             *BODY_ACTIONS,
+            *BOOLEAN_ACTIONS,
             *AVAILABLE_FACE_ACTIONS,
             *EDGE_MODIFY_ACTIONS,
             *VERTEX_MODIFY_ACTIONS,
@@ -57,91 +61,100 @@ GUI_CONTRACT = {
             "checked_actions": ("category_select", "select_object", "axis_x"),
             "enabled_actions": SELECT_ACTIONS,
             "disabled_actions": (
-                "move_selection",
-                "move_selection_normal",
+                "move",
                 "extrude",
                 "fillet",
                 "chamfer",
+                "fillet_chamfer",
                 "measure_distance",
             ),
-            "action_text": {"move_selection": "Move Selection"},
+            "action_text": {"move": "Move"},
             "forbidden_context_actions": _forbidden_context_actions(*SELECT_ACTIONS),
         },
         "vertex_selected": {
-            "work_mode": "modify",
+            "work_mode": "select",
             "selection_mode": "vertex",
             "selection_type": "vertex",
             "active_tool": "idle",
-            "context_actions": VERTEX_MODIFY_ACTIONS,
-            "checked_actions": ("category_modify", "select_vertex", "axis_x"),
-            "enabled_actions": VERTEX_MODIFY_ACTIONS,
+            "context_actions": SELECT_VERTEX_ACTIONS,
+            "checked_actions": ("category_select", "select_vertex", "axis_x"),
+            "enabled_actions": SELECT_VERTEX_ACTIONS,
             "disabled_actions": (
                 "extrude",
-                "move_selection_normal",
                 "fillet",
                 "chamfer",
+                "fillet_chamfer",
                 "measure_distance",
             ),
-            "action_text": {"move_selection": "Move Vertex"},
+            "action_text": {"move": "Move"},
             "forbidden_context_actions": _forbidden_context_actions(
-                *VERTEX_MODIFY_ACTIONS
+                *SELECT_VERTEX_ACTIONS
             ),
         },
         "edge_selected": {
-            "work_mode": "modify",
+            "work_mode": "select",
             "selection_mode": "edge",
             "selection_type": "edge",
             "active_tool": "idle",
-            "context_actions": EDGE_MODIFY_ACTIONS,
-            "checked_actions": ("category_modify", "select_edge", "axis_x"),
-            "enabled_actions": EDGE_MODIFY_ACTIONS,
+            "context_actions": SELECT_EDGE_ACTIONS,
+            "checked_actions": ("category_select", "select_edge", "axis_x"),
+            "enabled_actions": SELECT_EDGE_ACTIONS,
             "disabled_actions": (
                 "extrude",
-                "move_selection_normal",
                 "remove_face",
                 "circle_boss",
                 "circle_cut",
+                "fillet",
+                "chamfer",
             ),
-            "action_text": {"move_selection": "Move Edge"},
+            "action_text": {"move": "Move", "fillet_chamfer": "Fillet/Chamfer"},
             "forbidden_context_actions": _forbidden_context_actions(
-                *EDGE_MODIFY_ACTIONS
+                *SELECT_EDGE_ACTIONS
             ),
         },
         "face_selected": {
-            "work_mode": "modify",
+            "work_mode": "select",
             "selection_mode": "face",
             "selection_type": "face",
             "active_tool": "idle",
-            "context_actions": AVAILABLE_FACE_ACTIONS,
-            "checked_actions": ("category_modify", "select_face", "axis_x"),
-            "enabled_actions": AVAILABLE_FACE_ACTIONS,
-            "disabled_actions": ("fillet", "chamfer", "measure_distance"),
+            "context_actions": SELECT_FACE_ACTIONS,
+            "checked_actions": ("category_select", "select_face", "axis_x"),
+            "enabled_actions": SELECT_FACE_ACTIONS,
+            "disabled_actions": (
+                "fillet",
+                "chamfer",
+                "fillet_chamfer",
+                "measure_distance",
+            ),
             "action_text": {
-                "move_selection": "Move Face",
-                "start_sketch": "New Sketch (Face Plane)",
+                "move": "Move",
+                "extrude": "Extrude",
             },
             "forbidden_context_actions": _forbidden_context_actions(
-                *AVAILABLE_FACE_ACTIONS
+                *SELECT_FACE_ACTIONS
             ),
         },
         "body_selected": {
-            "work_mode": "transform",
+            "work_mode": "select",
             "selection_mode": "object",
             "selection_type": "object",
             "active_tool": "idle",
-            "context_actions": BODY_ACTIONS,
-            "checked_actions": ("category_transform", "select_object", "axis_x"),
-            "enabled_actions": BODY_ACTIONS,
+            "context_actions": SELECT_BODY_ACTIONS,
+            "checked_actions": ("category_select", "select_object", "axis_x"),
+            "enabled_actions": SELECT_BODY_ACTIONS,
             "disabled_actions": (
                 "move_selection",
                 "move_selection_normal",
                 "extrude",
                 "fillet",
                 "chamfer",
+                "fillet_chamfer",
                 "measure_distance",
             ),
-            "action_text": {"move_selection": "Move Selection"},
-            "forbidden_context_actions": _forbidden_context_actions(*BODY_ACTIONS),
+            "action_text": {"move": "Move"},
+            "forbidden_context_actions": _forbidden_context_actions(
+                *SELECT_BODY_ACTIONS,
+            ),
         },
     },
 }

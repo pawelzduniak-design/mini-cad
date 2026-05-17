@@ -50,6 +50,21 @@ def test_move_object_translates_whole_body() -> None:
     )
 
 
+def test_rebuild_bounds_guard_rejects_geometry_outside_moved_vertices() -> None:
+    require_ocp()
+
+    from cad_app.command_common import UnsupportedTopologyError
+    from cad_app.command_geometry import _assert_rebuild_bounds_match_vertices
+    from cad_app.command_topology import _shape_vertex_points
+    from cad_app.engine import make_box
+
+    shape = make_box(20.0, 20.0, 20.0)
+    expected_points = [(x, y, min(z, 10.0)) for x, y, z in _shape_vertex_points(shape)]
+
+    with pytest.raises(UnsupportedTopologyError, match="outside the moved vertices"):
+        _assert_rebuild_bounds_match_vertices(shape, expected_points)
+
+
 def test_thread_edge_adds_valid_modeled_thread_to_circular_edge() -> None:
     require_ocp()
 

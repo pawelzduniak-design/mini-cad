@@ -34,15 +34,24 @@ def build_main_window_actions(
         return action
 
     file_menu = window.menuBar().addMenu("&File")
-    file_menu.addAction(
-        make_action(
-            "save_project",
-            "Save",
-            lambda: viewer_widget._show_pending_command("Save"),
-            "Ctrl+Shift+S",
-            "Save the project.",
-        )
+    save_action = make_action(
+        "save_project",
+        "Save",
+        lambda: viewer_widget._show_pending_command("Save"),
+        None,
+        "Project save is not available.",
     )
+    save_action.setVisible(False)
+    save_action.setEnabled(False)
+    new_project_action = make_action(
+        "new_project",
+        "New Project",
+        viewer_widget._new_project,
+        "Ctrl+N",
+        "Discard the current model and start a new project.",
+    )
+    new_project_action.setIconText("New")
+    file_menu.addAction(new_project_action)
     file_menu.addAction(
         make_action(
             "import_step",
@@ -133,6 +142,13 @@ def build_main_window_actions(
             viewer_widget._clear_boolean_target,
             None,
             "Clear the pending boolean target.",
+        ),
+        make_action(
+            "cancel_boolean",
+            "Cancel Boolean",
+            viewer_widget._clear_boolean_target,
+            None,
+            "Cancel the pending boolean operation.",
         ),
         make_action(
             "boolean_union",
@@ -298,11 +314,27 @@ def build_main_window_actions(
             checkable=True,
         ),
         make_action(
+            "sketch_circle2_tool",
+            "Circle 2-Point",
+            lambda: viewer_widget._set_sketch_tool("circle_diameter"),
+            None,
+            "Draw a circle from two diameter points.",
+            checkable=True,
+        ),
+        make_action(
+            "sketch_center_radius_tool",
+            "Center Radius",
+            lambda: viewer_widget._set_sketch_tool("circle"),
+            None,
+            "Draw a circle from center and radius.",
+            checkable=True,
+        ),
+        make_action(
             "sketch_circle_tool",
             "Circle",
             lambda: viewer_widget._set_sketch_tool("circle"),
             None,
-            "Draw circles in the active sketch.",
+            "Compatibility alias for center-radius circles.",
             checkable=True,
         ),
         make_action(
@@ -441,10 +473,17 @@ def build_main_window_actions(
     tools_menu = window.menuBar().addMenu("&Tools")
     for action in (
         make_action(
+            "move",
+            "Move",
+            viewer_widget._begin_unified_move_tool,
+            "G",
+            "Move the selected body, topology, or sketch geometry.",
+        ),
+        make_action(
             "move_object",
             "Move",
             viewer_widget._begin_object_move_tool,
-            "G",
+            None,
             "Drag the active object with the viewport move manipulator.",
         ),
         make_action(
@@ -570,17 +609,17 @@ def build_main_window_actions(
         ),
         make_action(
             "push_pull",
-            "Push/Pull",
+            "Extrude",
             viewer_widget._begin_push_pull_tool,
-            "E",
-            "Push or pull the selected face or sketch profile.",
+            None,
+            "Compatibility alias for Extrude.",
         ),
         make_action(
             "extrude",
-            "Extrude Face",
-            viewer_widget._begin_extrude_tool,
-            None,
-            "Drag the selected face along its normal.",
+            "Extrude",
+            viewer_widget._begin_push_pull_tool,
+            "E",
+            "Extrude the selected face or sketch profile.",
         ),
         make_action(
             "edit_box_dimensions",
@@ -625,17 +664,24 @@ def build_main_window_actions(
             "Remove only the selected face and leave an open shell.",
         ),
         make_action(
+            "fillet_chamfer",
+            "Fillet/Chamfer",
+            viewer_widget._begin_fillet_chamfer_tool,
+            "R",
+            "Drag positive for fillet or negative for chamfer.",
+        ),
+        make_action(
             "fillet",
             "Fillet Edge",
             viewer_widget._begin_fillet_tool,
-            "R",
+            None,
             "Drag to set the selected edge fillet radius.",
         ),
         make_action(
             "chamfer",
             "Chamfer Edge",
             viewer_widget._begin_chamfer_tool,
-            "C",
+            None,
             "Drag to set the selected edge chamfer distance.",
         ),
         make_action(

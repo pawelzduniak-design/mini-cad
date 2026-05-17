@@ -107,6 +107,7 @@ def build_main_window_layout(
     browser_layout.addWidget(properties_list, 2)
     browser_dock.setWidget(browser_panel)
     window.addDockWidget(Qt.RightDockWidgetArea, browser_dock)
+    browser_dock.hide()
 
     status_bar = window.statusBar()
     status_bar.setObjectName("bottom_status_bar")

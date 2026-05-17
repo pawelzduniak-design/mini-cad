@@ -26,11 +26,10 @@ def test_face_selection_does_not_enable_whole_body_delete(qapp) -> None:
     state = widget.get_ui_state()
 
     assert state.selection_type == "face"
-    assert "push_pull" in state.context_actions
-    assert "start_sketch" in state.context_actions
+    assert "extrude" in state.context_actions
+    assert "move" in state.context_actions
     assert "delete_object" not in state.context_actions
     assert not main_window.actions["delete_object"].isEnabled()
-    assert main_window.actions["start_sketch"].text() == "New Sketch (Face Plane)"
 
 
 def test_sketch_object_selection_does_not_enable_body_transform(qapp) -> None:
@@ -47,7 +46,7 @@ def test_sketch_object_selection_does_not_enable_body_transform(qapp) -> None:
     )
     scene.set_selection(SelectionRef(profile_id, SelectionKind.OBJECT, 0))
     main_window = create_main_window(Viewer(), scene)
-    main_window.viewer_widget._set_active_category("transform")
+    main_window.viewer_widget._set_active_category("select")
 
     assert not main_window.actions["move_object"].isEnabled()
     assert not main_window.actions["rotate_body"].isEnabled()

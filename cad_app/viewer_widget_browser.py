@@ -324,23 +324,23 @@ class ViewerWidgetBrowserMixin:
                 "New Body"
                 if self._move_session.operation == "new_body"
                 else (
-                    "Push/Pull Cut"
+                    "Extrude Cut"
                     if self._move_session.operation == "cut"
                     else self._move_session.tool.replace("_", " ").title()
                 )
             )
             operation = "New Body"
             if self._move_session.tool == "extrude":
-                tool_name = "Push/Pull"
-                operation = "Push/Pull"
+                tool_name = "Extrude"
+                operation = "Extrude"
             elif self._move_session.tool == "sketch_extrude":
                 if self._move_session.operation == "new_body":
                     operation = "New Body"
                 elif self._move_session.operation == "cut":
-                    tool_name = "Push/Pull Cut"
+                    tool_name = "Extrude Cut"
                     operation = "Cut"
                 else:
-                    tool_name = "Push/Pull"
+                    tool_name = "Extrude"
                     operation = "Add"
             elif self._move_session.tool == "rotate":
                 operation = "Transform"
@@ -354,6 +354,13 @@ class ViewerWidgetBrowserMixin:
                 operation = "Round"
             elif self._move_session.tool == "chamfer":
                 operation = "Bevel"
+            elif self._move_session.tool == "fillet_chamfer":
+                if self._move_session.distance >= 0.0:
+                    tool_name = "Fillet"
+                    operation = "Round"
+                else:
+                    tool_name = "Chamfer"
+                    operation = "Bevel"
             self._add_browser_item(
                 properties_list,
                 f"Type: {tool_name }",
@@ -514,7 +521,7 @@ class ViewerWidgetBrowserMixin:
     def _move_axis_property_label(session: MoveSession) -> str:
         if session.tool in {"rotate", "sketch_revolve"}:
             return f"Axis: {session .axis_name }"
-        if session.tool in {"fillet", "chamfer"}:
+        if session.tool in {"fillet", "chamfer", "fillet_chamfer"}:
             return f"Edge: {session .index }"
         return f"Direction: {session .axis_name }"
 
@@ -526,6 +533,10 @@ class ViewerWidgetBrowserMixin:
             return f"Radius: {session .distance :.2f} mm"
         if session.tool == "chamfer":
             return f"Distance: {session .distance :.2f} mm"
+        if session.tool == "fillet_chamfer":
+            if session.distance >= 0.0:
+                return f"Radius: {session .distance :.2f} mm"
+            return f"Distance: {abs(session .distance) :.2f} mm"
         if session.tool == "sketch_extrude" and session.operation == "cut":
             return f"Depth: {abs(session .distance) :.2f} mm"
         return f"Distance: {session .distance :.2f} mm"

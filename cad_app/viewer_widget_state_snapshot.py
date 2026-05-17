@@ -20,6 +20,8 @@ class ViewerWidgetStateSnapshotMixin:
             selection_mode=self._selection_kind.value,
             selection_type=self._ui_selection_type(),
             active_tool=self._ui_active_tool(),
+            command_mode=self._ui_command_mode(),
+            boolean_target_item_id=self._valid_boolean_target_item_id(),
             active_operation=self._ui_operation_state(),
             context_actions=self._ui_context_actions(),
             status_text=self._last_status_text,
@@ -40,6 +42,8 @@ class ViewerWidgetStateSnapshotMixin:
                 "selection_mode": state.selection_mode,
                 "selection_type": state.selection_type,
                 "active_tool": state.active_tool,
+                "command_mode": state.command_mode,
+                "boolean_target_item_id": state.boolean_target_item_id,
                 "active_operation": self._json_value(state.active_operation),
                 "context_actions": list(state.context_actions),
                 "status_text": state.status_text,
@@ -51,6 +55,7 @@ class ViewerWidgetStateSnapshotMixin:
             },
             "regions": self._export_layout_regions(),
             "actions": self._export_action_states(),
+            "overlays": self._export_overlay_states(),
             "context_tool_panel": self._export_context_tool_panel(),
             "hud": self._export_hud_state(),
         }
@@ -174,6 +179,86 @@ class ViewerWidgetStateSnapshotMixin:
             for name, label in self._hud_labels.items()
         }
 
+    def _export_overlay_states(self) -> dict[str, dict]:
+        overlays = {
+            "dimension_overlay": self._widget_overlay_state(self._dimension_overlay),
+            "tool_popover": self._widget_overlay_state(
+                getattr(self, "_tool_popover", None)
+            ),
+            "move_manipulator": self._widget_overlay_state(
+                getattr(self, "_move_manipulator_overlay", None)
+            ),
+            "view_cube": self._widget_overlay_state(
+                getattr(self, "_orientation_gizmo_overlay", None)
+            ),
+            "context_hint": self._widget_overlay_state(
+                getattr(self, "_context_hint_overlay", None)
+            ),
+            "grid_axis_labels": self._grid_axis_labels_state(),
+            "inline_dimension_editors": {
+                key: self._widget_overlay_state(editor)
+                for key, editor in getattr(
+                    self,
+                    "_inline_dimension_editors",
+                    {},
+                ).items()
+            },
+        }
+        return overlays
+
+    def _grid_axis_labels_state(self) -> dict:
+        values = (-200, -150, -100, -50, 50, 100, 150, 200)
+        labels = tuple(f"{axis} {value}" for axis in ("X", "Y") for value in values)
+        visible = bool(
+            getattr(self._viewer, "is_initialized", False)
+            and getattr(self._viewer, "_grid_enabled", False)
+        )
+        viewport_rect = self.rect()
+        return {
+            "object_name": "grid_axis_labels",
+            "visible": visible,
+            "rect": {
+                "x": viewport_rect.x(),
+                "y": viewport_rect.y(),
+                "width": viewport_rect.width(),
+                "height": viewport_rect.height(),
+            },
+            "text": " ".join(labels),
+            "labels": [
+                {
+                    "object_name": f"native_grid_label_{index}",
+                    "visible": visible,
+                    "rect": {"x": 0, "y": 0, "width": 0, "height": 0},
+                    "text": text,
+                }
+                for index, text in enumerate(labels)
+            ],
+        }
+
+    def _widget_overlay_state(self, widget) -> dict:
+        if widget is None:
+            return {
+                "object_name": "",
+                "visible": False,
+                "rect": {"x": 0, "y": 0, "width": 0, "height": 0},
+                "text": "",
+            }
+        rect = self._child_rect_in_viewport(widget)
+        if rect is None:
+            rect = widget.rect()
+        text = widget.text() if hasattr(widget, "text") else ""
+        return {
+            "object_name": widget.objectName(),
+            "visible": not widget.isHidden(),
+            "rect": {
+                "x": rect.x(),
+                "y": rect.y(),
+                "width": rect.width(),
+                "height": rect.height(),
+            },
+            "text": text,
+        }
+
     @staticmethod
     def _json_value(value):
         if isinstance(value, Enum):
@@ -218,6 +303,13 @@ class ViewerWidgetStateSnapshotMixin:
             return self._move_session.tool
         return "idle"
 
+    def _ui_command_mode(self) -> str:
+        if self._sketch_session is not None or self._move_session is not None:
+            return "active_tool"
+        if self._valid_boolean_target_item_id() is not None:
+            return "boolean_target"
+        return "normal"
+
     def _ui_operation_state(self) -> OperationState:
         if self._sketch_session is not None:
             return OperationState.DRAWING_SKETCH
@@ -246,6 +338,7 @@ class ViewerWidgetStateSnapshotMixin:
     def _ui_overlay_visible(self) -> bool:
         return bool(
             not self._dimension_overlay.isHidden()
+            or (hasattr(self, "_tool_popover") and not self._tool_popover.isHidden())
             or (
                 self._move_session is not None
                 and self._move_session.tool in {"extrude", "sketch_extrude"}
@@ -256,7 +349,7 @@ class ViewerWidgetStateSnapshotMixin:
         return bool(
             self._move_session is not None
             and self._move_session.tool
-            in {"extrude", "sketch_extrude", "move", "sketch_move"}
+            in {"extrude", "sketch_extrude", "move", "sketch_move", "rotate"}
         )
 
     def _ui_right_panel_context(self) -> str:
@@ -264,6 +357,8 @@ class ViewerWidgetStateSnapshotMixin:
             return "active_operation"
         if self._sketch_session is not None:
             return "sketch"
+        if self._valid_boolean_target_item_id() is not None:
+            return "boolean"
         if self._scene.selection_refs():
             return "selection"
         if self._scene.active_item_id() is not None:

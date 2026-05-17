@@ -82,16 +82,12 @@ CATEGORY_DEFS: tuple[MenuCategory, ...] = (
 
 CATEGORY_BY_ID = {category.category_id: category for category in CATEGORY_DEFS}
 CATEGORY_IDS = tuple(category.category_id for category in CATEGORY_DEFS)
-CATEGORY_RAIL_ACTIONS = tuple(
-    category.action_name
-    for category in CATEGORY_DEFS
-    if category.action_name not in {"category_create", "category_file"}
-)
+CATEGORY_RAIL_ACTIONS = ("category_select", "category_sketch")
 
 TOP_TOOLBAR_ACTIONS = (
     "undo",
     "redo",
-    "save_project",
+    "new_project",
     "export_step",
     "fit_all",
     "home",
@@ -111,7 +107,8 @@ SKETCH_START_ACTIONS = ("start_sketch",)
 SKETCH_DRAW_ACTIONS = (
     "sketch_line_tool",
     "sketch_arc_tool",
-    "sketch_circle_tool",
+    "sketch_circle2_tool",
+    "sketch_center_radius_tool",
     "sketch_rectangle3_tool",
     "sketch_center_rectangle_tool",
     "sketch_trim",
@@ -119,53 +116,39 @@ SKETCH_DRAW_ACTIONS = (
 SKETCH_ACTIVE_ACTIONS = (*SKETCH_DRAW_ACTIONS, "finish_sketch")
 PROFILE_ACTIONS = (
     "edit_sketch",
-    "edit_sketch_dimensions",
-    "edit_position",
-    "sketch_trim",
-    "move_sketch",
-    "push_pull",
+    "move",
+    "extrude",
     "sketch_new_body",
     "sketch_revolve",
-    "sketch_revolve_x",
-    "sketch_revolve_y",
-    "sketch_revolve_z",
     "delete_sketch",
 )
 SKETCH_OBJECT_ACTIONS = (
     "edit_sketch",
-    "edit_position",
-    "sketch_trim",
-    "move_sketch",
+    "move",
     "delete_sketch",
 )
 MULTI_PROFILE_ACTIONS = (
-    "move_sketch",
-    "push_pull",
+    "move",
+    "extrude",
     "sketch_new_body",
     "delete_sketch",
 )
-MULTI_BODY_ACTIONS = ("move_object",)
 
 CREATE_ACTIONS = ("add_box", "import_step")
-BODY_ACTIONS = (
-    "edit_box_dimensions",
-    "edit_position",
-    "move_object",
-    "rotate_body",
-    "rotate_body_x",
-    "rotate_body_y",
-    "rotate_body_z",
-    "mirror_body",
-)
 BOOLEAN_ACTIONS = (
     "set_boolean_target",
-    "clear_boolean_target",
     "boolean_union",
     "boolean_subtract",
     "boolean_intersect",
+    "cancel_boolean",
+)
+MULTI_BODY_ACTIONS = ("move",)
+BODY_ACTIONS = (
+    "move",
+    "rotate_body",
 )
 VIEW_ACTIONS = ("fit_all", "home", "display_shaded", "display_wireframe")
-FILE_ACTIONS = ("save_project", "import_step", "export_step")
+FILE_ACTIONS = ("new_project", "import_step", "export_step")
 MEASURE_ACTIONS = (
     "measure_distance",
     "measure_angle",
@@ -173,24 +156,15 @@ MEASURE_ACTIONS = (
 )
 
 FACE_MODIFY_ACTIONS = (
-    "start_sketch",
-    "edit_box_dimensions",
-    "push_pull",
-    "move_selection",
-    "move_selection_normal",
-    "offset_face",
+    "extrude",
+    "move",
     "remove_face",
-    "circle_boss",
-    "circle_cut",
 )
 EDGE_MODIFY_ACTIONS = (
-    "measure_distance",
-    "edit_edge_length",
-    "fillet",
-    "chamfer",
-    "move_selection",
+    "move",
+    "fillet_chamfer",
 )
-VERTEX_MODIFY_ACTIONS = ("move_selection",)
+VERTEX_MODIFY_ACTIONS = ("move",)
 EMPTY_MODIFY_SECTIONS = ()
 
 

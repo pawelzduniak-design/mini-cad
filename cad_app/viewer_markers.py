@@ -405,11 +405,16 @@ class ViewerMarkerMixin:
 
     @staticmethod
     def _prefers_wireframe_marker(shape: TopoDS_Shape) -> bool:
-        from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_VERTEX, TopAbs_WIRE
+        from OCP.TopAbs import TopAbs_EDGE, TopAbs_VERTEX, TopAbs_WIRE
 
+        # FACE is deliberately excluded. Rendering a face selection as a
+        # wireframe draws only its perimeter loop, which on a cylinder
+        # side face spans both the top and the bottom circle plus the
+        # seam — beginners read that as "I selected both top and bottom
+        # faces". A filled translucent face overlay highlights the
+        # actual picked surface without the perimeter ambiguity.
         return shape.ShapeType() in {
             TopAbs_EDGE,
-            TopAbs_FACE,
             TopAbs_VERTEX,
             TopAbs_WIRE,
         }

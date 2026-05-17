@@ -71,6 +71,7 @@ class Viewer(ViewerMarkerMixin):
         self._context: AIS_InteractiveContext | None = None
         self._window: WNT_Window | None = None
         self._window_handle_capsule: Any | None = None
+        self._native_widget: Any | None = None
         self._ais_map: dict[str, AIS_Shape] = {}
         self._edge_map: dict[str, AIS_Shape] = {}
         self._shape_map: dict[str, Any] = {}
@@ -111,7 +112,6 @@ class Viewer(ViewerMarkerMixin):
         from OCP.OpenGl import OpenGl_GraphicDriver
         from OCP.Quantity import Quantity_Color, Quantity_TOC_RGB
         from OCP.V3d import V3d_Viewer
-        from OCP.WNT import WNT_Window
 
         if self.is_initialized:
             return
@@ -127,11 +127,8 @@ class Viewer(ViewerMarkerMixin):
         self._context = AIS_InteractiveContext(self._viewer)
         self._view = self._viewer.CreateView()
 
-        self._window_handle_capsule = create_native_handle_capsule(widget.winId())
-        self._window = WNT_Window(self._window_handle_capsule)
-        self._view.SetWindow(self._window)
-        if not self._window.IsMapped():
-            self._window.Map()
+        self._native_widget = widget
+        self._bind_native_window()
 
         self._view.SetBackgroundColor(
             Quantity_Color(*theme.VIEWPORT_BG, Quantity_TOC_RGB)
@@ -152,21 +149,46 @@ class Viewer(ViewerMarkerMixin):
     def resize(self) -> None:
         if not self.is_initialized:
             return
+        self._resize_native_window()
         self.view.MustBeResized()
 
-    def refresh_native_window(self) -> None:
+    def refresh_native_window(self, *, rebind: bool = False) -> None:
         if not self.is_initialized:
             return
+        if rebind:
+            self._bind_native_window()
         if self._window is not None and hasattr(self._window, "IsMapped"):
             try:
                 if not self._window.IsMapped() and hasattr(self._window, "Map"):
                     self._window.Map()
             except RuntimeError:
                 LOGGER.debug("Native viewer window remap check failed", exc_info=True)
+        self._resize_native_window()
         self.view.MustBeResized()
         if self._context is not None and hasattr(self._context, "UpdateCurrentViewer"):
             self._context.UpdateCurrentViewer()
         self.view.Redraw()
+
+    def _resize_native_window(self) -> None:
+        if self._window is None or not hasattr(self._window, "DoResize"):
+            return
+        try:
+            self._window.DoResize()
+        except RuntimeError:
+            LOGGER.debug("Native viewer window resize failed", exc_info=True)
+
+    def _bind_native_window(self) -> None:
+        if self._native_widget is None or self._view is None:
+            return
+        from OCP.WNT import WNT_Window
+
+        self._window_handle_capsule = create_native_handle_capsule(
+            self._native_widget.winId()
+        )
+        self._window = WNT_Window(self._window_handle_capsule)
+        self._view.SetWindow(self._window)
+        if not self._window.IsMapped():
+            self._window.Map()
 
     def clear(self, redraw: bool = True) -> None:
         if not self.is_initialized:
@@ -314,7 +336,7 @@ class Viewer(ViewerMarkerMixin):
         self.clear_grid()
 
         grid_color = Quantity_Color(*theme.GRID_MINOR, Quantity_TOC_RGB)
-        major_color = Quantity_Color(*theme.GRID_MAJOR, Quantity_TOC_RGB)
+        label_color = Quantity_Color(0.86, 0.91, 0.96, Quantity_TOC_RGB)
         grid = AIS_Shape(build_grid_shape(size, step, z_offset))
         grid.SetColor(grid_color)
         grid.SetWidth(1.0)
@@ -340,8 +362,8 @@ class Viewer(ViewerMarkerMixin):
                 label = AIS_TextLabel()
                 label.SetText(TCollection_ExtendedString(text))
                 label.SetPosition(position)
-                label.SetHeight(10.0)
-                label.SetColor(major_color)
+                label.SetHeight(11.0)
+                label.SetColor(label_color)
                 self._display_passive_object(label)
 
         if redraw:

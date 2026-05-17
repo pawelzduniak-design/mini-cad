@@ -54,6 +54,8 @@ class UIState:
     selection_mode: str
     selection_type: str
     active_tool: str
+    command_mode: str
+    boolean_target_item_id: str | None
     active_operation: OperationState
     context_actions: tuple[str, ...]
     status_text: str

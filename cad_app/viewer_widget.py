@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QCheckBox,
     QDoubleSpinBox,
     QFrame,
@@ -114,7 +115,7 @@ class ViewerWidget(
         self._last_status_text = "Ready"
         self._context_hint_text = ""
         self._orientation_gizmo_enabled = True
-        self._orientation_gizmo_overlay_visible = False
+        self._orientation_gizmo_overlay_visible = True
         self._orientation_gizmo_press: tuple[int, int] | None = None
         self._orientation_gizmo_dragging = False
         self._dimension_overlay = QLabel(self)
@@ -173,14 +174,14 @@ class ViewerWidget(
             }}
             """
         for key, label, width in (
-            ("edge", "", 118),
-            ("box_width", "W", 108),
-            ("box_depth", "D", 108),
-            ("box_height", "H", 108),
-            ("sketch_width", "W", 108),
-            ("sketch_height", "H", 108),
-            ("sketch_radius", "R", 108),
-            ("sketch_inner_radius", "Inner R", 138),
+            ("edge", "", 150),
+            ("box_width", "W", 150),
+            ("box_depth", "D", 150),
+            ("box_height", "H", 150),
+            ("sketch_width", "W", 150),
+            ("sketch_height", "H", 150),
+            ("sketch_radius", "R", 150),
+            ("sketch_inner_radius", "Inner R", 182),
         ):
             editor = QDoubleSpinBox(self)
             object_name = (
@@ -196,6 +197,7 @@ class ViewerWidget(
             editor.setDecimals(2)
             editor.setRange(0.001, 1_000_000.0)
             editor.setSuffix(" mm")
+            editor.setButtonSymbols(QAbstractSpinBox.NoButtons)
             if label:
                 editor.setPrefix(f"{label} ")
             editor.setFixedWidth(width)
@@ -230,8 +232,12 @@ class ViewerWidget(
     def _build_tool_popover(self) -> None:
         self._tool_popover = QFrame(self)
         self._tool_popover.setObjectName("tool_popover")
+        self._tool_popover.setWindowFlags(
+            Qt.Tool | Qt.FramelessWindowHint | Qt.WindowDoesNotAcceptFocus
+        )
         self._tool_popover.setFrameShape(QFrame.NoFrame)
         self._tool_popover.setAttribute(Qt.WA_StyledBackground, True)
+        self._tool_popover.setAttribute(Qt.WA_ShowWithoutActivating)
         self._tool_popover.setStyleSheet(theme.tool_popover_stylesheet())
         self._tool_popover.setFixedWidth(260)
         self._tool_popover_layout_key = None
@@ -251,6 +257,7 @@ class ViewerWidget(
         self._tool_distance_input.setDecimals(2)
         self._tool_distance_input.setRange(-1_000_000.0, 1_000_000.0)
         self._tool_distance_input.setSuffix(" mm")
+        self._tool_distance_input.setButtonSymbols(QAbstractSpinBox.NoButtons)
         self._tool_distance_input.setKeyboardTracking(False)
         self._tool_distance_input.valueChanged.connect(self._tool_primary_value_changed)
         self._tool_secondary_label = QLabel("Elevation", self._tool_popover)
@@ -260,6 +267,7 @@ class ViewerWidget(
         self._tool_secondary_input.setDecimals(2)
         self._tool_secondary_input.setRange(-1_000_000.0, 1_000_000.0)
         self._tool_secondary_input.setSuffix(" mm")
+        self._tool_secondary_input.setButtonSymbols(QAbstractSpinBox.NoButtons)
         self._tool_secondary_input.setKeyboardTracking(False)
         self._tool_secondary_input.valueChanged.connect(
             self._tool_secondary_value_changed
@@ -350,15 +358,73 @@ class ViewerWidget(
         if not hasattr(self, "_tool_popover"):
             return
         margin = 14
-        self._tool_popover.move(
-            max(margin, self.width() - self._tool_popover.width() - margin),
-            margin,
+        self._tool_popover.adjustSize()
+        width = self._tool_popover.width()
+        height = self._tool_popover.height()
+        bottom_reserved = 70
+        candidates = (
+            (max(margin, self.width() - width - margin), margin),
+            (margin, margin),
+            (
+                max(margin, self.width() - width - margin),
+                max(margin, self.height() - height - margin - bottom_reserved),
+            ),
+            (margin, max(margin, self.height() - height - margin - bottom_reserved)),
+            (max(margin, (self.width() - width) // 2), margin),
         )
+        obstacles = self._tool_popover_obstacles()
+        x, y = candidates[0]
+        best_overlap: int | None = None
+        for candidate_x, candidate_y in candidates:
+            candidate = QRect(candidate_x, candidate_y, width, height)
+            overlap = sum(
+                candidate.intersected(obstacle).width()
+                * candidate.intersected(obstacle).height()
+                for obstacle in obstacles
+                if candidate.intersects(obstacle)
+            )
+            if overlap == 0:
+                x, y = candidate_x, candidate_y
+                break
+            if best_overlap is None or overlap < best_overlap:
+                best_overlap = overlap
+                x, y = candidate_x, candidate_y
+        if self._tool_popover.isWindow():
+            self._tool_popover.move(self.mapToGlobal(QPoint(x, y)))
+        else:
+            self._tool_popover.move(x, y)
+
+    def _tool_popover_obstacles(self) -> list[QRect]:
+        obstacles: list[QRect] = []
+        for widget_name in (
+            "_move_manipulator_overlay",
+            "_orientation_gizmo_overlay",
+            "_dimension_overlay",
+            "_context_hint_overlay",
+        ):
+            widget = getattr(self, widget_name, None)
+            rect = self._child_rect_in_viewport(widget)
+            if rect is not None:
+                obstacles.append(rect.adjusted(-8, -8, 8, 8))
+        for editor in getattr(self, "_inline_dimension_editors", {}).values():
+            rect = self._child_rect_in_viewport(editor)
+            if rect is not None:
+                obstacles.append(rect.adjusted(-8, -8, 8, 8))
+        return obstacles
+
+    def _child_rect_in_viewport(self, widget) -> QRect | None:
+        if widget is None or widget.isHidden():
+            return None
+        if widget.isWindow():
+            top_left = self.mapFromGlobal(widget.geometry().topLeft())
+        else:
+            top_left = widget.pos()
+        return QRect(top_left, widget.size())
 
     @staticmethod
     def _tool_popover_summary_text(session: MoveSession) -> str:
         if session.tool in {"extrude", "sketch_extrude"}:
-            operation = "cut" if session.operation == "cut" else "push/pull"
+            operation = "cut" if session.operation == "cut" else "extrude"
             if (
                 session.tool == "sketch_extrude"
                 and session.operation == "auto"
@@ -383,11 +449,16 @@ class ViewerWidget(
             self._tool_distance_label.setText("Angle")
             self._tool_distance_input.setRange(-360_000.0, 360_000.0)
             self._tool_distance_input.setSuffix(" deg")
-        elif session.tool in {"fillet", "chamfer"}:
+        elif session.tool in {"fillet", "chamfer", "fillet_chamfer"}:
             self._tool_distance_label.setText(
-                "Radius" if session.tool == "fillet" else "Distance"
+                "Radius/Distance"
+                if session.tool == "fillet_chamfer"
+                else ("Radius" if session.tool == "fillet" else "Distance")
             )
-            self._tool_distance_input.setRange(0.001, 1_000_000.0)
+            self._tool_distance_input.setRange(
+                -1_000_000.0 if session.tool == "fillet_chamfer" else 0.001,
+                1_000_000.0,
+            )
             self._tool_distance_input.setSuffix(" mm")
         else:
             self._tool_distance_label.setText("Distance")
@@ -440,10 +511,10 @@ class ViewerWidget(
         self._move_session.operation = "cut" if checked else "auto"
         if checked:
             self._move_session.distance = -abs(self._move_session.distance or 10.0)
-            self._set_context_hint("Push/Pull will subtract from the host body")
+            self._set_context_hint("Extrude will subtract from the host body")
         else:
             self._set_context_hint(
-                "Push/Pull auto: outward adds, inward subtracts from the host"
+                "Extrude auto: outward adds, inward subtracts from the host"
             )
         self._update_tool_parameter_preview()
 

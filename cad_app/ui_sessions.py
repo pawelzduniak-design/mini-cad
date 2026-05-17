@@ -65,6 +65,9 @@ def sketch_dimension_label(
     if tool == "circle":
         radius = math.hypot(end_uv[0] - start_uv[0], end_uv[1] - start_uv[1])
         return f"R {radius:.1f}"
+    if tool == "circle_diameter":
+        diameter = math.hypot(end_uv[0] - start_uv[0], end_uv[1] - start_uv[1])
+        return f"D {diameter:.1f}"
     raise ValueError(f"Unsupported sketch tool: {tool}")
 
 

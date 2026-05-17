@@ -98,6 +98,7 @@ def test_clicking_contract_body_topology_context_matrix(qapp) -> None:
         BODY_ACTIONS,
         EDGE_MODIFY_ACTIONS,
         FACE_MODIFY_ACTIONS,
+        SELECT_ACTIONS,
         VERTEX_MODIFY_ACTIONS,
     )
     from cad_app.viewer import Viewer
@@ -117,11 +118,12 @@ def test_clicking_contract_body_topology_context_matrix(qapp) -> None:
         item_id,
         SelectionKind.OBJECT,
         0,
-        "transform",
+        "select",
     )
+    expected_body_actions = (*SELECT_ACTIONS, *BODY_ACTIONS, "set_boolean_target")
     assert state.selection_type == "object"
-    assert _command_action_names(main_window) == BODY_ACTIONS
-    assert state.context_actions == BODY_ACTIONS
+    assert _command_action_names(main_window) == expected_body_actions
+    assert state.context_actions == expected_body_actions
     _assert_command_surface_matches_state(main_window)
 
     state = _select_topology(
@@ -130,17 +132,13 @@ def test_clicking_contract_body_topology_context_matrix(qapp) -> None:
         item_id,
         SelectionKind.FACE,
         top_planar_face_index(shape),
-        "modify",
+        "select",
     )
     assert state.selection_type == "face"
-    assert _command_action_names(main_window) == tuple(
-        action_name
-        for action_name in FACE_MODIFY_ACTIONS
-        if action_name != "offset_face"
-    )
-    assert "offset_face" not in state.context_actions
-    assert main_window.actions["start_sketch"].text() == "New Sketch (Face Plane)"
-    assert main_window.actions["move_selection"].text() == "Move Face"
+    expected_face_actions = (*SELECT_ACTIONS, *FACE_MODIFY_ACTIONS)
+    assert _command_action_names(main_window) == expected_face_actions
+    assert state.context_actions == expected_face_actions
+    assert main_window.actions["move"].text() == "Move"
     _assert_command_surface_matches_state(main_window)
 
     state = _select_topology(
@@ -149,12 +147,13 @@ def test_clicking_contract_body_topology_context_matrix(qapp) -> None:
         item_id,
         SelectionKind.EDGE,
         1,
-        "modify",
+        "select",
     )
     assert state.selection_type == "edge"
-    assert _command_action_names(main_window) == EDGE_MODIFY_ACTIONS
-    assert state.context_actions == EDGE_MODIFY_ACTIONS
-    assert main_window.actions["move_selection"].text() == "Move Edge"
+    expected_edge_actions = (*SELECT_ACTIONS, *EDGE_MODIFY_ACTIONS)
+    assert _command_action_names(main_window) == expected_edge_actions
+    assert state.context_actions == expected_edge_actions
+    assert main_window.actions["move"].text() == "Move"
     _assert_command_surface_matches_state(main_window)
 
     state = _select_topology(
@@ -163,12 +162,13 @@ def test_clicking_contract_body_topology_context_matrix(qapp) -> None:
         item_id,
         SelectionKind.VERTEX,
         1,
-        "modify",
+        "select",
     )
     assert state.selection_type == "vertex"
-    assert _command_action_names(main_window) == VERTEX_MODIFY_ACTIONS
-    assert state.context_actions == VERTEX_MODIFY_ACTIONS
-    assert main_window.actions["move_selection"].text() == "Move Vertex"
+    expected_vertex_actions = (*SELECT_ACTIONS, *VERTEX_MODIFY_ACTIONS)
+    assert _command_action_names(main_window) == expected_vertex_actions
+    assert state.context_actions == expected_vertex_actions
+    assert main_window.actions["move"].text() == "Move"
     _assert_command_surface_matches_state(main_window)
 
 
@@ -198,9 +198,8 @@ def test_transform_category_does_not_promote_topology_to_body_tools(qapp) -> Non
         widget._set_active_category("transform")
 
         state = widget.get_ui_state()
-        assert state.work_mode == "transform"
-        assert state.context_actions == ()
-        assert _command_action_names(main_window) == ()
+        assert state.work_mode == "select"
+        assert "move_object" not in state.context_actions
         assert not main_window.actions["move_object"].isEnabled()
         assert not main_window.actions["rotate_body"].isEnabled()
         assert not main_window.actions["mirror_body"].isEnabled()
@@ -214,7 +213,7 @@ def test_clicking_contract_sketch_profile_context_matrix(qapp) -> None:
     from cad_app.scene import Scene
     from cad_app.sketch import SKETCH_META_KIND, make_rectangle_profile
     from cad_app.types import SelectionKind, SelectionRef
-    from cad_app.ui_menu import PROFILE_ACTIONS
+    from cad_app.ui_menu import PROFILE_ACTIONS, SELECT_ACTIONS
     from cad_app.viewer import Viewer
     from cad_app.workplane import Workplane
 
@@ -233,11 +232,11 @@ def test_clicking_contract_sketch_profile_context_matrix(qapp) -> None:
     main_window.viewer_widget._set_active_category("modify")
     state = main_window.viewer_widget.get_ui_state()
 
+    expected_actions = (*SELECT_ACTIONS, *PROFILE_ACTIONS)
     assert state.selection_type == "sketch_profile"
-    assert _command_action_names(main_window) == PROFILE_ACTIONS
-    assert state.context_actions == PROFILE_ACTIONS
-    assert "extrude" not in state.context_actions
-    assert not main_window.actions["extrude"].isEnabled()
+    assert _command_action_names(main_window) == expected_actions
+    assert state.context_actions == expected_actions
+    assert "extrude" in state.context_actions
     assert not main_window.actions["export_step"].isEnabled()
     _assert_command_surface_matches_state(main_window)
 
@@ -385,7 +384,11 @@ def test_clicking_contract_multi_selection_context_matrix(qapp) -> None:
         make_rectangle_profile,
     )
     from cad_app.types import SelectionKind, SelectionRef
-    from cad_app.ui_menu import MULTI_BODY_ACTIONS, MULTI_PROFILE_ACTIONS
+    from cad_app.ui_menu import (
+        MULTI_BODY_ACTIONS,
+        MULTI_PROFILE_ACTIONS,
+        SELECT_ACTIONS,
+    )
     from cad_app.viewer import Viewer
     from cad_app.workplane import Workplane
 
@@ -408,8 +411,9 @@ def test_clicking_contract_multi_selection_context_matrix(qapp) -> None:
     state = widget.get_ui_state()
 
     assert state.selection_type == "multi_object"
-    assert state.context_actions == MULTI_BODY_ACTIONS
-    assert _command_action_names(main_window) == MULTI_BODY_ACTIONS
+    expected_multi_body_actions = (*SELECT_ACTIONS, *MULTI_BODY_ACTIONS)
+    assert state.context_actions == expected_multi_body_actions
+    assert _command_action_names(main_window) == expected_multi_body_actions
     _assert_command_surface_matches_state(main_window)
 
     for refs, expected_type in (
@@ -448,8 +452,8 @@ def test_clicking_contract_multi_selection_context_matrix(qapp) -> None:
         state = widget.get_ui_state()
 
         assert state.selection_type == expected_type
-        assert state.context_actions == ()
-        assert _command_action_names(main_window) == ()
+        assert state.context_actions == SELECT_ACTIONS
+        assert _command_action_names(main_window) == SELECT_ACTIONS
         _assert_command_surface_matches_state(main_window)
 
     profile_scene = Scene()
@@ -475,8 +479,9 @@ def test_clicking_contract_multi_selection_context_matrix(qapp) -> None:
     profile_state = profile_widget.get_ui_state()
 
     assert profile_state.selection_type == "multi_sketch_profile"
-    assert profile_state.context_actions == MULTI_PROFILE_ACTIONS
-    assert _command_action_names(profile_window) == MULTI_PROFILE_ACTIONS
+    expected_multi_profile_actions = (*SELECT_ACTIONS, *MULTI_PROFILE_ACTIONS)
+    assert profile_state.context_actions == expected_multi_profile_actions
+    assert _command_action_names(profile_window) == expected_multi_profile_actions
     _assert_command_surface_matches_state(profile_window)
 
 
@@ -514,11 +519,11 @@ def test_multi_body_move_applies_to_all_selected_bodies(qapp) -> None:
     widget._selection_kind = SelectionKind.OBJECT
     widget._set_active_category("transform")
 
-    main_window.actions["move_object"].trigger()
+    main_window.actions["move"].trigger()
     assert widget._move_session is not None
     assert widget.get_ui_state().manipulator_visible
-    assert widget.get_ui_state().context_actions == ("move_object", "cancel_tool")
-    assert _command_action_names(main_window) == ("move_object", "cancel_tool")
+    assert widget.get_ui_state().context_actions == ("move", "cancel_tool")
+    assert _command_action_names(main_window) == ("move", "cancel_tool")
     assert widget._move_session.item_ids == (first_id, second_id)
     QTest.mouseClick(
         widget._move_manipulator_overlay,
@@ -536,6 +541,97 @@ def test_multi_body_move_applies_to_all_selected_bodies(qapp) -> None:
     assert bounding_box(scene.get(second_id).shape)["xmin"] == pytest.approx(
         second_before["xmin"] + 12.0
     )
+    assert scene.selection_refs() == (
+        SelectionRef(first_id, SelectionKind.OBJECT, 0),
+        SelectionRef(second_id, SelectionKind.OBJECT, 0),
+    )
+    assert widget._move_session is not None
+    assert widget._move_session.distance == pytest.approx(0.0)
+    assert widget.get_ui_state().active_tool == "move"
+
+
+def test_edge_move_starts_axis_manipulator_and_moves_edge(qapp) -> None:
+    require_ocp()
+
+    import pytest
+    from OCP.Bnd import Bnd_Box
+    from OCP.BRepBndLib import BRepBndLib
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+
+    from cad_app.commands import supports_move_edge_controlled
+    from cad_app.engine import make_box
+    from cad_app.main_window import create_main_window
+    from cad_app.picker import Picker
+    from cad_app.scene import Scene
+    from cad_app.types import SelectionKind, SelectionRef
+    from cad_app.ui_menu import SELECT_ACTIONS
+    from cad_app.viewer import Viewer
+    from tests.helpers.topology import bounding_box
+
+    def edge_bounds(edge_shape):
+        bounds = Bnd_Box()
+        BRepBndLib.Add_s(edge_shape, bounds)
+        x_min, _y_min, _z_min, x_max, _y_max, _z_max = bounds.Get()
+        return x_min, x_max
+
+    scene = Scene()
+    item_id = scene.add_shape(
+        make_box(),
+        meta={"kind": "body", "source": "primitive_box"},
+    )
+    picker = Picker(scene)
+    before = bounding_box(scene.get(item_id).shape)
+    edge_index = None
+    for index in range(1, picker.count_subshapes(item_id, SelectionKind.EDGE) + 1):
+        if not supports_move_edge_controlled(scene.get(item_id).shape, index):
+            continue
+        _x_min, x_max = edge_bounds(picker.subshape(item_id, SelectionKind.EDGE, index))
+        if x_max == pytest.approx(before["xmax"]):
+            edge_index = index
+            break
+    assert edge_index is not None
+
+    main_window = create_main_window(Viewer(), scene)
+    widget = main_window.viewer_widget
+    scene.set_selection(SelectionRef(item_id, SelectionKind.EDGE, edge_index))
+    widget._selection_kind = SelectionKind.EDGE
+    widget._set_active_category("select")
+
+    assert widget.get_ui_state().context_actions[: len(SELECT_ACTIONS)] == (
+        SELECT_ACTIONS
+    )
+    main_window.actions["move"].trigger()
+
+    state = widget.get_ui_state()
+    assert state.selection_type == "edge"
+    assert state.active_tool == "move"
+    assert state.manipulator_visible
+    assert state.context_actions == ("move", "cancel_tool")
+    assert "move edge" in state.status_text.lower()
+    assert widget._move_session.target_kind == SelectionKind.EDGE
+    assert widget._move_session.axis_name == "X"
+
+    QTest.mouseClick(
+        widget._move_manipulator_overlay,
+        Qt.LeftButton,
+        Qt.NoModifier,
+        QPoint(41, 123),
+    )
+    assert widget._move_session.axis_name == "Y"
+    QTest.mouseClick(
+        widget._move_manipulator_overlay,
+        Qt.LeftButton,
+        Qt.NoModifier,
+        QPoint(136, 78),
+    )
+    assert widget._move_session.axis_name == "X"
+
+    widget._move_session.distance = 12.0
+    widget._commit_move_session()
+
+    after = bounding_box(scene.get(item_id).shape)
+    assert after["xmax"] == pytest.approx(before["xmax"] + 12.0)
 
 
 def test_move_properties_report_transform_operation(qapp) -> None:
@@ -554,7 +650,7 @@ def test_move_properties_report_transform_operation(qapp) -> None:
     widget = main_window.viewer_widget
     widget._set_active_category("transform")
 
-    main_window.actions["move_object"].trigger()
+    main_window.actions["move"].trigger()
     properties = widget._browser_lists["properties"]
     texts = [properties.item(index).text() for index in range(properties.count())]
 
@@ -598,11 +694,11 @@ def test_sketch_move_translates_profile_and_dimension_metadata(qapp) -> None:
     widget = main_window.viewer_widget
     widget._set_active_category("modify")
 
-    main_window.actions["move_sketch"].trigger()
+    main_window.actions["move"].trigger()
     assert widget._move_session is not None
     assert widget.get_ui_state().manipulator_visible
-    assert widget.get_ui_state().context_actions == ("move_sketch", "cancel_tool")
-    assert _command_action_names(main_window) == ("move_sketch", "cancel_tool")
+    assert widget.get_ui_state().context_actions == ("move", "cancel_tool")
+    assert _command_action_names(main_window) == ("move", "cancel_tool")
     assert widget._move_session.tool == "sketch_move"
     assert widget._move_session.item_ids == (profile_id,)
     widget._set_move_axis_from_manipulator("X")
@@ -643,7 +739,7 @@ def test_delete_sketch_removes_selected_profile(qapp) -> None:
     assert main_window.viewer_widget.get_ui_state().selection_type == "none"
 
 
-def test_multi_sketch_profile_push_pull_applies_to_all_selected_profiles(qapp) -> None:
+def test_multi_sketch_profile_extrude_applies_to_all_selected_profiles(qapp) -> None:
     require_ocp()
 
     import pytest
@@ -681,7 +777,7 @@ def test_multi_sketch_profile_push_pull_applies_to_all_selected_profiles(qapp) -
     widget._selection_kind = SelectionKind.FACE
     widget._set_active_category("modify")
 
-    main_window.actions["push_pull"].trigger()
+    main_window.actions["extrude"].trigger()
     assert widget._move_session is not None
     assert widget._move_session.item_ids == (rectangle_id, circle_id)
     widget._move_session.distance = 18.0
@@ -693,7 +789,7 @@ def test_multi_sketch_profile_push_pull_applies_to_all_selected_profiles(qapp) -
     assert bounding_box(scene.get(circle_id).shape)["height"] == pytest.approx(18.0)
 
 
-def test_sketch_category_requires_explicit_new_sketch_before_draw_tools(qapp) -> None:
+def test_sketch_category_starts_new_sketch_and_exposes_draw_tools(qapp) -> None:
     from cad_app.main_window import create_main_window
     from cad_app.scene import Scene
     from cad_app.ui_menu import SKETCH_ACTIVE_ACTIONS, SKETCH_DRAW_ACTIONS
@@ -705,23 +801,25 @@ def test_sketch_category_requires_explicit_new_sketch_before_draw_tools(qapp) ->
     main_window.actions["category_sketch"].trigger()
     state = widget.get_ui_state()
 
-    assert _command_action_names(main_window) == ("start_sketch",)
-    assert state.context_actions == ("start_sketch",)
-    _assert_command_surface_matches_state(main_window)
-    for action_name in SKETCH_DRAW_ACTIONS:
-        assert not main_window.actions[action_name].isEnabled(), action_name
-
-    main_window.actions["sketch_line_tool"].trigger()
-    assert widget._sketch_session is None
-    assert _command_action_names(main_window) == ("start_sketch",)
-    _assert_command_surface_matches_state(main_window)
-
-    main_window.actions["start_sketch"].trigger()
-    state = widget.get_ui_state()
-
     assert widget._sketch_session is not None
     assert _command_action_names(main_window) == SKETCH_ACTIVE_ACTIONS
     assert state.context_actions == SKETCH_ACTIVE_ACTIONS
+    _assert_command_surface_matches_state(main_window)
+    for action_name in SKETCH_DRAW_ACTIONS:
+        assert main_window.actions[action_name].isEnabled(), action_name
+
+    main_window.actions["sketch_line_tool"].trigger()
+    assert widget._sketch_session is not None
+    assert widget._sketch_session.tool == "line"
+    assert _command_action_names(main_window) == SKETCH_ACTIVE_ACTIONS
+    _assert_command_surface_matches_state(main_window)
+
+    main_window.actions["category_select"].trigger()
+    state = widget.get_ui_state()
+
+    assert widget._sketch_session is None
+    assert state.context_actions
+    assert state.context_actions[0] == "select_object"
     _assert_command_surface_matches_state(main_window)
 
 
@@ -733,6 +831,7 @@ def test_command_surface_hides_unavailable_actions_across_common_states(qapp) ->
     from cad_app.main_window import create_main_window
     from cad_app.scene import Scene
     from cad_app.types import SelectionKind, SelectionRef
+    from cad_app.ui_menu import SELECT_ACTIONS
     from cad_app.viewer import Viewer
 
     empty_window = create_main_window(Viewer(), Scene())
@@ -771,16 +870,25 @@ def test_command_surface_hides_unavailable_actions_across_common_states(qapp) ->
     scene.set_selection(SelectionRef(first_id, SelectionKind.OBJECT, 0))
     widget._set_active_category("boolean")
     _assert_command_surface_matches_state(main_window)
-    assert _command_action_names(main_window) == ("set_boolean_target",)
+    assert _command_action_names(main_window) == (
+        *SELECT_ACTIONS,
+        "move",
+        "rotate_body",
+        "set_boolean_target",
+    )
 
     main_window.actions["set_boolean_target"].trigger()
     scene.set_selection(SelectionRef(second_id, SelectionKind.OBJECT, 0))
     widget._set_active_category("boolean")
     _assert_command_surface_matches_state(main_window)
     assert _command_action_names(main_window) == (
-        "set_boolean_target",
-        "clear_boolean_target",
         "boolean_union",
         "boolean_subtract",
         "boolean_intersect",
+        "cancel_boolean",
     )
+    state = widget.get_ui_state()
+    assert state.command_mode == "boolean_target"
+    assert state.boolean_target_item_id == first_id
+    assert "move" not in state.context_actions
+    assert "rotate_body" not in state.context_actions

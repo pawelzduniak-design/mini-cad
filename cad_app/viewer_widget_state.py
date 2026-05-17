@@ -18,6 +18,7 @@ from cad_app.sketch import (
 from cad_app.types import SelectionKind, SelectionRef
 from cad_app.ui_menu import validate_category_id
 from cad_app.viewer_widget_state_snapshot import ViewerWidgetStateSnapshotMixin
+from cad_app.workplane import Workplane
 
 LOGGER = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ class ViewerWidgetStateMixin(ViewerWidgetStateSnapshotMixin):
             return
         self._hover_selection = None
         self._hide_edge_dimension_editor()
+        self._discard_sessions_referencing_missing_items()
         if self._viewer.is_initialized:
             self._viewer.display_scene(self._scene, fit=False)
         self._show_status("Undo")
@@ -60,10 +62,48 @@ class ViewerWidgetStateMixin(ViewerWidgetStateSnapshotMixin):
             return
         self._hover_selection = None
         self._hide_edge_dimension_editor()
+        self._discard_sessions_referencing_missing_items()
         if self._viewer.is_initialized:
             self._viewer.display_scene(self._scene, fit=False)
         self._show_status("Redo")
         LOGGER.info("Redo applied")
+
+    def _discard_sessions_referencing_missing_items(self) -> None:
+        """Drop move/sketch sessions whose targets vanished from the scene.
+
+        After Undo/Redo (or any path that mutates scene state behind a
+        live tool) the active session may reference an item_id that no
+        longer exists. Without cleanup the Move manipulator keeps
+        floating at the origin and the status bar still reads
+        ``Tool: Move``, which is exactly the symptom the user
+        screenshotted (blad.png): no body, but X/Y/Z arrows stayed put.
+        """
+        move_session = self._move_session
+        if move_session is not None:
+            missing_primary = move_session.item_id not in self._scene
+            missing_multi = bool(move_session.item_ids) and any(
+                item_id not in self._scene for item_id in move_session.item_ids
+            )
+            if missing_primary or missing_multi:
+                self._move_session = None
+                self._hide_dimension_overlay()
+                if self._viewer.is_initialized:
+                    self._viewer.clear_preview_marker()
+                    self._viewer.clear_extrude_affordance_marker()
+                if hasattr(self, "_move_manipulator_overlay"):
+                    self._move_manipulator_overlay.hide()
+                LOGGER.info("Move session discarded after scene mutation: target gone")
+        sketch_session = self._sketch_session
+        if sketch_session is not None and sketch_session.host is not None:
+            host_item_id = sketch_session.host[0]
+            if host_item_id not in self._scene:
+                self._sketch_session = None
+                self._hide_dimension_overlay()
+                self._hide_sketch_plane_chooser()
+                if self._viewer.is_initialized:
+                    self._viewer.clear_preview_marker()
+                    self._viewer.clear_sketch_plane_marker()
+                LOGGER.info("Sketch session discarded after scene mutation: host gone")
 
     def _delete_active_object(self) -> None:
         if self._move_session is not None or self._sketch_session is not None:
@@ -117,6 +157,7 @@ class ViewerWidgetStateMixin(ViewerWidgetStateSnapshotMixin):
     def _clear_boolean_target(self) -> None:
         self._boolean_target_item_id = None
         self._show_status("Boolean target cleared")
+        self._set_context_hint("Boolean cancelled")
         self._refresh_action_state()
 
     def _apply_boolean_tool(self, operation: str) -> None:
@@ -146,6 +187,8 @@ class ViewerWidgetStateMixin(ViewerWidgetStateSnapshotMixin):
         if self._viewer.is_initialized:
             self._viewer.display_scene(self._scene, fit=False)
         self._show_status(f"Boolean {operation } applied")
+        self._set_context_hint("Boolean applied")
+        self._refresh_action_state()
         LOGGER.info(
             "Boolean %s applied target=%s tool=%s",
             operation,
@@ -240,10 +283,84 @@ class ViewerWidgetStateMixin(ViewerWidgetStateSnapshotMixin):
         self._navigation.go_home()
         self._show_status("Home view")
 
+    def _apply_orientation_gizmo_target(
+        self,
+        axis: str,
+        positive: bool,
+        label: str,
+    ) -> None:
+        self._navigation.view_axis(axis, positive=positive)
+        self._navigation.capture_home()
+        if self._viewer.is_initialized:
+            self._viewer.update_view()
+            self._viewer.refresh_native_window()
+        self._refresh_overlays_after_camera_change()
+        self._show_status(f"View: {label}")
+        if hasattr(self, "_schedule_viewport_activation_refresh"):
+            self._schedule_viewport_activation_refresh()
+
     def _set_display_mode(self, mode: str) -> None:
         self._viewer.set_display_mode(mode)
         self._show_status(f"Display: {mode }")
         self._refresh_action_state()
+
+    def _new_project(self, confirm: bool = True) -> None:
+        if confirm and len(self._scene) > 0:
+            from PySide6.QtWidgets import QMessageBox
+
+            answer = QMessageBox.question(
+                self.window(),
+                "New Project",
+                "Discard current model?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                self._show_status("New project cancelled")
+                return
+
+        self._move_session = None
+        self._sketch_session = None
+        self._boolean_target_item_id = None
+        self._hover_selection = None
+        self._area_selection = []
+        self._selection_press = None
+        self._selection_drag_start = None
+        self._selection_drag_current = None
+        self._selection_source = None
+        self._active_workplane = Workplane.world_xy()
+        self._active_workplane_label = "XY"
+        self._active_workplane_host = None
+        self._pending_sketch_tool = "center_rectangle"
+        self._sketch_extrude_operation = "add"
+        self._scene.clear()
+        self._hide_dimension_overlay()
+        self._hide_edge_dimension_editor()
+        if hasattr(self, "_selection_box_overlay"):
+            self._selection_box_overlay.clear()
+        if hasattr(self, "_move_manipulator_overlay"):
+            self._move_manipulator_overlay.hide()
+        if hasattr(self, "_tool_popover"):
+            self._tool_popover.hide()
+        if hasattr(self, "_hide_sketch_plane_chooser"):
+            self._hide_sketch_plane_chooser()
+        if self._viewer.is_initialized:
+            self._viewer.clear_selection_marker(redraw=False)
+            self._viewer.clear_hover_marker(redraw=False)
+            self._viewer.clear_preview_marker(redraw=False)
+            self._viewer.clear_extrude_affordance_marker(redraw=False)
+            self._viewer.clear_dimension_label(redraw=False)
+            self._viewer.show_sketch_geometry = True
+            self._viewer.display_scene(self._scene, fit=True)
+            self._viewer.set_selection_kind(SelectionKind.FACE)
+            self._navigation.capture_home()
+        self._active_category = "sketch"
+        self._selection_kind = SelectionKind.FACE
+        self._set_context_hint("Start a new sketch")
+        self._show_status("New project")
+        self._activate_sketch_category()
+        self._refresh_browser()
+        LOGGER.info("New project started")
 
     def _show_status(self, message: str) -> None:
         self._last_status_text = message
@@ -338,15 +455,10 @@ class ViewerWidgetStateMixin(ViewerWidgetStateSnapshotMixin):
         if self._viewer.is_initialized:
             self._viewer.set_selection_kind(SelectionKind.FACE)
         if self._sketch_session is None:
-            self._set_context_hint(
-                "Sketch: New Sketch starts on the bottom plane; select a planar "
-                "face first to sketch on that face"
-            )
-            self._show_status("Mode: Sketch")
-            self._hide_sketch_plane_chooser()
-            self._position_orientation_gizmo_overlay()
+            self._start_sketch_on_selection()
+            return
         else:
-            self._set_context_hint("Choose a sketch tool: Line, Arc, Circle, Rectangle")
+            self._set_context_hint(self._sketch_tool_hint(self._sketch_session.tool))
             self._show_status("Sketch tools ready")
             self._hide_sketch_plane_chooser()
             self._position_orientation_gizmo_overlay()
@@ -354,16 +466,22 @@ class ViewerWidgetStateMixin(ViewerWidgetStateSnapshotMixin):
 
     def _set_active_category(self, category: str) -> None:
         category_def = validate_category_id(category)
+        if category not in {"select", "sketch"}:
+            category = "select"
+            category_def = validate_category_id(category)
         if category == "sketch":
             self._activate_sketch_category()
             return
         if self._sketch_session is not None:
+            empty_sketch = (
+                hasattr(self, "_sketch_session_is_empty")
+                and self._sketch_session_is_empty()
+            )
             self._finish_sketch_session(
-                status="Sketch finished",
+                status="Sketch discarded" if empty_sketch else "Sketch finished",
                 context_hint=category_def.context_hint,
                 category=category,
             )
-            self._show_status(f"Mode: {category_def.label}")
             return
         self._active_category = category
         self._hide_sketch_plane_chooser()
@@ -373,6 +491,11 @@ class ViewerWidgetStateMixin(ViewerWidgetStateSnapshotMixin):
 
     def _show_dimension_overlay(self, text: str, x: int, y: int) -> None:
         self._dimension_overlay.setText(text)
+        if self._move_session is not None:
+            self._dimension_overlay.hide()
+            if self._viewer.is_initialized:
+                self._viewer.clear_dimension_label()
+            return
         if self._viewer.is_initialized:
             self._dimension_overlay.hide()
             self._viewer.display_dimension_label(

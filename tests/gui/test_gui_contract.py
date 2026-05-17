@@ -56,9 +56,19 @@ def test_export_ui_state_is_json_serializable_and_names_layout_regions(qapp) -> 
         "state",
         "regions",
         "actions",
+        "overlays",
         "context_tool_panel",
         "hud",
     }
+    assert exported["state"]["command_mode"] in {
+        "normal",
+        "active_tool",
+        "boolean_target",
+    }
+    assert "boolean_target_item_id" in exported["state"]
+    assert "tool_popover" in exported["overlays"]
+    assert "view_cube" in exported["overlays"]
+    assert "grid_axis_labels" in exported["overlays"]
     for region_name in GUI_CONTRACT["layout_regions"]:
         region = exported["regions"][region_name]
         assert region["present"], region_name
@@ -86,16 +96,16 @@ def test_edge_move_tool_exports_useful_active_status_and_hint(qapp) -> None:
 
     fixture = create_box_contract_window()
     exported = apply_contract_context(fixture, "edge_selected")
-    assert exported["actions"]["move_selection"]["enabled"]
-    assert exported["actions"]["move_selection"]["text"] == "Move Edge"
+    assert exported["actions"]["move"]["enabled"]
+    assert exported["actions"]["move"]["text"] == "Move"
 
-    fixture.main_window.actions["move_selection"].trigger()
+    fixture.main_window.actions["move"].trigger()
     exported = fixture.main_window.export_ui_state()
 
     assert exported["state"]["active_tool"] == "move"
     assert exported["state"]["active_operation"] == "command_pending"
     assert exported["context_tool_panel"]["actions"] == [
-        "move_selection",
+        "move",
         "cancel_tool",
     ]
     assert exported["actions"]["cancel_tool"]["enabled"]
