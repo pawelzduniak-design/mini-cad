@@ -9,9 +9,9 @@ The detailed click/selection/menu matrix lives in
 
 ## Workspace
 
-- Left rail: modeling category/mode selection only. Empty projects open in
-  Sketch with New Sketch as the first action. File/import actions stay in the
-  main File menu and top/global chrome, not the left rail.
+- Left rail: Select and Sketch only. Empty projects enter Sketch immediately
+  and show draw tools. File/import/view actions stay in top/global chrome, not
+  the left rail.
 - Context command panel: commands available for the current mode, selection,
   and active tool.
 - Viewport: dominant modeling area.
@@ -21,32 +21,31 @@ The detailed click/selection/menu matrix lives in
 
 - Object selection targets whole-body commands.
 - Face, edge, and vertex selection targets local topology commands.
-- Sketch profile selection targets profile commands such as Push/Pull, new
-  body, revolve, dimensions, edit sketch, move sketch, delete sketch, and
-  trim.
+- Sketch profile selection targets profile commands such as Extrude, New Body,
+  Revolve, Edit Sketch, Move, and Delete Sketch.
 - Ctrl-click and area selection can hold multiple selections for every
-  selection kind. Multi-body selection exposes only body Move, and the move
+  selection kind. Multi-body selection exposes only Move, and the move
   operation applies to every selected body. Multi-sketch-profile selection
-  exposes sketch Move, Push/Pull, New Body, and Delete Sketch.
+  exposes Move, Extrude, New Body, and Delete Sketch.
 - Sketch trim is segment-click based. Selecting a full sketch profile and
   activating trim must enter trim mode, not delete the whole profile.
 - Body transform commands require a real body. Sketch objects must never unlock
   whole-body move, rotate, mirror, or delete commands.
 - `delete_object` is never a fallback for face/edge/vertex selection.
-- Body transform commands target bodies only. Sketch Move is a separate sketch
-  command and updates the sketch metadata used by dimensions and trimming.
+- Move is one public command for bodies, local topology, and sketch geometry.
+  Sketch moves still update the sketch metadata used by dimensions and trimming.
 - Boolean commands require an explicit target body and a separate tool body.
-  Set Boolean Target stays visible when a body exists so the Boolean category is
-  never an empty panel in a valid body workflow.
+  Boolean actions live in the body context, not as a left-rail mode.
 
 ## Sketch
 
-- `start_sketch` starts a new independent sketch.
+- Entering Sketch starts a new independent sketch immediately.
 - On empty selection, it uses the bottom/XY plane.
 - On selected planar body face, it stores that body face as the feature host so
-  Push/Pull can either add material or subtract it from the active tool popover.
-- Sketch draw tools are unavailable until `start_sketch` has created an active
-  sketch session.
+  Extrude can either add material or subtract it from the active tool popover.
+- If the user leaves Sketch without drawing anything, the empty sketch session
+  is discarded.
+- Sketch exposes two circle tools: Circle 2-Point and Center Radius.
 - Independent bottom-plane sketches must not create `host_item_id` metadata.
 - Sketch-created profiles and entities carry a stable `sketch_id`; edit, trim,
   and region rebuilds must stay scoped to that sketch, not every profile on the
@@ -58,9 +57,12 @@ The detailed click/selection/menu matrix lives in
 
 ## Direct Modeling
 
-- `push_pull`, `move_selection`, `move_selection_normal`, `remove_face`,
-  `circle_boss`, and `circle_cut` are face-context commands.
-- `fillet`, `chamfer`, and supported edge move are edge-context commands.
+- `extrude`, `move`, and `remove_face` are face-context commands.
+- `fillet_chamfer` and supported `move` are edge-context commands. Positive
+  values apply fillet; negative values apply chamfer.
+- Face, edge, and vertex Move start with a visible X/Y/Z viewport manipulator
+  at the selected topology anchor. Dragging an arrow constrains movement to
+  that axis; dragging in the viewport remains a view-plane fallback.
 - `thread` is an edge-context command for circular edges only. It supports ISO
   and UNC presets, custom pitch/length/depth, external/internal/auto type, and
   modeled or cosmetic representation.
@@ -74,9 +76,9 @@ The detailed click/selection/menu matrix lives in
 
 ## Parametric History
 
-- Body-generating Push/Pull and Sketch Revolve create a feature tree with
+- Body-generating Extrude and Sketch Revolve create a feature tree with
   the sketch profile as the rebuild base.
-- Face Push/Pull, hosted sketch Push/Pull, and Thread append editable feature
+- Face Extrude, hosted sketch Extrude, and Thread append editable feature
   steps to the target body's feature tree.
 - Feature steps store user parameters and a stable-enough topological reference:
   planar faces are remapped by center, normal, and area; circular thread edges
@@ -95,6 +97,6 @@ The detailed click/selection/menu matrix lives in
 
 ## Planned But Not Implemented
 
-- `offset_face`, `mirror_body`, and measurement tools may be visible but must be
-  hidden from invalid context panels, disabled, or report pending behavior
-  instead of mutating geometry.
+- `offset_face`, `mirror_body`, legacy axis-specific moves, and measurement
+  tools stay hidden from adaptive context panels until they have a clear
+  workflow.

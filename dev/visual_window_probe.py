@@ -21,8 +21,12 @@ from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QToolBar, QWidget
 
+from cad_app.commands import supports_move_edge_controlled
+from cad_app.engine import make_box
 from cad_app.main_window import create_main_window
+from cad_app.picker import Picker
 from cad_app.scene import Scene
+from cad_app.types import SelectionKind, SelectionRef
 from cad_app.viewer import Viewer
 
 
@@ -44,6 +48,11 @@ SCENARIOS: tuple[CaptureSpec, ...] = (
         flow_actions=("reactivate_window",),
     ),
     CaptureSpec(
+        "maximized_viewport",
+        ("maximize_window",),
+        flow_actions=("maximize_window",),
+    ),
+    CaptureSpec(
         "sketch_mode",
         ("category_sketch",),
         flow_actions=("category_sketch",),
@@ -58,6 +67,29 @@ SCENARIOS: tuple[CaptureSpec, ...] = (
         ("click_gizmo_z",),
         flow_actions=("click_gizmo_z",),
         expect_status="View: Top",
+    ),
+    CaptureSpec(
+        "move_edge_active",
+        ("create_box_select_edge", "move"),
+        flow_actions=("create_box_select_edge", "move"),
+        expect_gizmo=False,
+    ),
+    CaptureSpec(
+        "resize_cycles",
+        (
+            "maximize_window",
+            "restore_window",
+            "resize_smaller",
+            "maximize_window",
+            "restore_window",
+        ),
+        flow_actions=(
+            "maximize_window",
+            "restore_window",
+            "resize_smaller",
+            "maximize_window",
+            "restore_window",
+        ),
     ),
 )
 
@@ -258,6 +290,33 @@ def _overlay_state(widget) -> dict[str, Any]:
 
 def _perform_capture_action(app, main_window, action_name: str) -> None:
     widget = main_window.viewer_widget
+    if action_name == "create_box_select_edge":
+        if widget._move_session is not None:
+            widget._cancel_move_session()
+        if widget._sketch_session is not None:
+            widget._cancel_sketch_session()
+        scene = main_window.scene
+        scene.clear()
+        item_id = scene.add_shape(
+            make_box(),
+            meta={"kind": "body", "source": "visual_probe_box"},
+        )
+        if widget._viewer.is_initialized:
+            widget._viewer.display_scene(scene, fit=True)
+        picker = Picker(scene)
+        edge_index = 1
+        for index in range(1, picker.count_subshapes(item_id, SelectionKind.EDGE) + 1):
+            if supports_move_edge_controlled(scene.get(item_id).shape, index):
+                edge_index = index
+                break
+        scene.set_selection(SelectionRef(item_id, SelectionKind.EDGE, edge_index))
+        widget._selection_kind = SelectionKind.EDGE
+        if widget._viewer.is_initialized:
+            widget._viewer.set_selection_kind(SelectionKind.EDGE)
+        widget._set_active_category("select")
+        app.processEvents()
+        QTest.qWait(160)
+        return
     if action_name == "reactivate_window":
         other_window = QWidget()
         other_window.setWindowTitle("CAD activation probe")
@@ -275,6 +334,28 @@ def _perform_capture_action(app, main_window, action_name: str) -> None:
         other_window.close()
         app.processEvents()
         QTest.qWait(120)
+        return
+    if action_name == "maximize_window":
+        main_window.window.showMaximized()
+        widget.setFocus()
+        app.processEvents()
+        QTest.qWait(1250)
+        app.processEvents()
+        return
+    if action_name == "restore_window":
+        main_window.window.showNormal()
+        main_window.window.resize(1280, 820)
+        widget.setFocus()
+        app.processEvents()
+        QTest.qWait(1250)
+        app.processEvents()
+        return
+    if action_name == "resize_smaller":
+        main_window.window.resize(720, 540)
+        widget.setFocus()
+        app.processEvents()
+        QTest.qWait(1250)
+        app.processEvents()
         return
     if action_name == "click_gizmo_z":
         left, top, size = widget._orientation_gizmo_rect()
@@ -373,6 +454,13 @@ def _capture_window(
     ui_state = widget.get_ui_state()
     if spec.expect_status is not None and ui_state.status_text != spec.expect_status:
         problems.append("expected_status_not_seen")
+    if spec.name == "move_edge_active":
+        if ui_state.active_tool != "move":
+            problems.append("move_edge_tool_not_active")
+        if not ui_state.manipulator_visible:
+            problems.append("move_edge_manipulator_not_visible")
+        if widget._move_manipulator_overlay.isHidden():
+            problems.append("move_edge_overlay_hidden")
     return {
         "name": spec.name,
         "actions": list(spec.actions),

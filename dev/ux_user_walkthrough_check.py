@@ -8,6 +8,7 @@ from cad_app.main_window import create_main_window
 from cad_app.scene import Scene
 from cad_app.sketch import SKETCH_META_KIND, make_center_rectangle_profile
 from cad_app.types import SelectionKind, SelectionRef
+from cad_app.ui_menu import SKETCH_ACTIVE_ACTIONS
 from cad_app.viewer import Viewer
 from cad_app.workplane import Workplane
 
@@ -55,63 +56,39 @@ def main() -> int:
         widget._hud_labels["axis"].text(), "face", "Selection mode visible: Face"
     )
     _assert_contains(
-        widget._hud_labels["tool"].text(), "idle", "No conflicting active tools"
+        widget._hud_labels["tool"].text(),
+        "Sketch center_rectangle",
+        "Initial sketch tool visible",
     )
     if main_window.actions["category_transform"].isEnabled():
         _fail("Transform is enabled on an empty scene")
     _pass("Transform disabled on empty scene")
     startup_tools = _command_action_names(main_window)
-    if startup_tools != ["start_sketch"]:
-        _fail(f"Startup sketch action is not clear: {startup_tools}")
-    _pass("Startup New Sketch action is visible")
+    if startup_tools != list(SKETCH_ACTIVE_ACTIONS):
+        _fail(f"Startup sketch tools are not clear: {startup_tools}")
+    _pass("Startup sketch tools are visible")
 
     _log("INFO", "Entering Sketch mode")
     main_window.actions["category_sketch"].trigger()
     _assert_contains(widget._hud_labels["mode"].text(), "Sketch", "Sketch mode visible")
     sketch_start_tools = _command_action_names(main_window)
-    if "start_sketch" not in sketch_start_tools:
-        _fail("New Sketch action is not visible after entering Sketch")
-    _pass("New Sketch action is visible")
-    premature_draw_tools = {
-        "sketch_line_tool",
-        "sketch_arc_tool",
-        "sketch_circle_tool",
-        "sketch_rectangle3_tool",
-        "sketch_center_rectangle_tool",
-        "sketch_trim",
-    }.intersection(sketch_start_tools)
-    if premature_draw_tools:
-        _fail(
-            "Sketch draw tools are visible before New Sketch: "
-            f"{sorted(premature_draw_tools)}"
-        )
-    _pass("Sketch draw tools hidden until New Sketch")
-    hint_text = widget.get_ui_state().hint_text
-    _assert_contains(
-        hint_text,
-        "bottom plane",
-        "Context hint points to the default sketch plane",
-    )
-
-    _log("INFO", "Starting new sketch")
-    main_window.actions["start_sketch"].trigger()
-    _assert_contains(
-        widget._hud_labels["tool"].text(),
-        "Sketch center_rectangle",
-        "Active sketch tool visible",
-    )
-    sketch_tools = _command_action_names(main_window)
+    if sketch_start_tools != list(SKETCH_ACTIVE_ACTIONS):
+        _fail(f"Sketch action list is wrong: {sketch_start_tools}")
+    _pass("Sketch mode exposes draw tools immediately")
+    sketch_tools = sketch_start_tools
     expected_tools = {
         "sketch_line_tool",
         "sketch_arc_tool",
-        "sketch_circle_tool",
+        "sketch_circle2_tool",
+        "sketch_center_radius_tool",
         "sketch_rectangle3_tool",
         "sketch_center_rectangle_tool",
     }
     if not expected_tools.issubset(set(sketch_tools)):
         _fail(f"Sketch tools missing: {sorted(expected_tools - set(sketch_tools))}")
     _pass(
-        "Sketch tools visible: Line, Arc, Circle, Rectangle 3 Point, Center Rectangle"
+        "Sketch tools visible: Line, Arc, two Circle modes, "
+        "Rectangle 3 Point, Center Rectangle"
     )
     hint_text = widget.get_ui_state().hint_text
     _assert_contains(
@@ -130,38 +107,45 @@ def main() -> int:
         (0.0, 0.0),
         (30.0, 15.0),
     )
-    profile_id = scene.add_shape(profile, meta={"kind": SKETCH_META_KIND})
+    profile_id = scene.add_shape(
+        profile,
+        meta={"kind": SKETCH_META_KIND, "profile": "center_rectangle"},
+    )
     scene.set_selection(SelectionRef(profile_id, SelectionKind.FACE, 1))
-    widget._active_category = "modify"
+    widget._active_category = "select"
+    widget._refresh_action_state()
     widget._refresh_hud()
     _assert_contains(
         widget._hud_labels["selection"].text(),
         "Sketch Profile",
         "UI says Selection: Sketch Profile",
     )
-    if "push_pull" not in _command_action_names(main_window):
-        _fail("Push/Pull action is not visible for Sketch Profile")
-    _pass("Push/Pull action is visible")
+    if "extrude" not in _command_action_names(main_window):
+        _fail("Extrude action is not visible for Sketch Profile")
+    _pass("Extrude action is visible")
 
-    _log("INFO", "Starting Push/Pull UX state")
-    main_window.actions["push_pull"].trigger()
+    _log("INFO", "Starting Extrude UX state")
+    main_window.actions["extrude"].trigger()
     _assert_contains(
         widget._hud_labels["tool"].text(),
-        "Push/Pull",
-        "Active tool visible: Push/Pull",
+        "Extrude",
+        "Active tool visible: Extrude",
     )
     if "idle" in widget._hud_labels["tool"].text():
-        _fail("Status says Tool: idle during Push/Pull")
+        _fail("Status says Tool: idle during Extrude")
     _pass("Status does not say Tool: idle")
     if widget.findChild(QLabel, "DimensionOverlay") is None:
         _fail("Dimension overlay component missing")
     _pass("Dimension overlay component exists")
-    if widget._dimension_overlay.isHidden():
-        _fail("Dimension overlay is hidden after starting Extrude")
-    _pass("Overlay visible near action")
+    if not widget._dimension_overlay.isHidden():
+        _fail("Viewport dimension overlay duplicates the Extrude popover")
+    _pass("Viewport dimension overlay hidden during active tool")
+    if not hasattr(widget, "_tool_popover") or widget._tool_popover.isHidden():
+        _fail("Tool popover is hidden after starting Extrude")
+    _pass("Tool popover visible near action")
     if not callable(main_window.viewer.display_extrude_affordance):
-        _fail("Push/Pull affordance renderer missing")
-    _pass("Push/Pull manipulator/arrow renderer exists")
+        _fail("Extrude affordance renderer missing")
+    _pass("Extrude manipulator/arrow renderer exists")
     _assert_contains(
         widget.get_ui_state().hint_text,
         "drag height",

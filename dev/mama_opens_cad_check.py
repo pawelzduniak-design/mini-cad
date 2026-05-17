@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication
 
 from cad_app.main_window import create_main_window
 from cad_app.scene import Scene
+from cad_app.ui_menu import SKETCH_ACTIVE_ACTIONS
 from cad_app.viewer import Viewer
 
 
@@ -106,9 +107,9 @@ def main() -> int:
         if "face" not in widget._hud_labels["axis"].text():
             _fail("Initial selection mode is not visible as Face")
         _pass("Initial selection mode is visible")
-        if _command_action_names(widget) != ["start_sketch"]:
-            _fail("New Sketch is not visible on startup")
-        _pass("New Sketch is visible on startup")
+        if _command_action_names(widget) != list(SKETCH_ACTIVE_ACTIONS):
+            _fail("Sketch draw tools are not visible on startup")
+        _pass("Sketch draw tools are visible on startup")
 
         main_window.actions["category_sketch"].trigger()
         app.processEvents()

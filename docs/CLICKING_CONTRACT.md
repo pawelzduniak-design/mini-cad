@@ -14,9 +14,8 @@ Source of truth in code:
 
 ## UI Areas
 
-- Left rail changes modeling category only: Select, Modify, Sketch, Boolean,
-  Transform, Measure, and View. Empty projects open in Sketch so New Sketch is
-  the first available action. File/import actions stay in the main File menu.
+- Left rail has only Select and Sketch. Empty projects enter Sketch immediately
+  and show draw tools. File/import/view actions stay in top/global chrome.
 - Top toolbar contains global actions: Undo, Redo, Save, Export STEP, Fit All,
   Home View, Shaded, Wireframe.
 - Context command panel shows only commands that are enabled for the active
@@ -34,10 +33,8 @@ Source of truth in code:
 3. The picker returns a body, face, edge, vertex, or sketch profile according
    to the current selection mode.
 4. The app stores `Scene.selection`.
-5. The app changes the category automatically:
-   - body/object click -> Transform
-   - face/edge/vertex click -> Modify
-   - sketch profile click -> Modify with profile commands
+5. The adaptive command panel is selection-driven. Select remains the public
+   work mode unless Sketch is active.
 6. The selection marker is redrawn.
 7. Context hint, status, Properties, and command panel refresh.
 
@@ -49,10 +46,9 @@ Clicking empty space clears the selection and reports `No selection`.
 - Multi-selection works for bodies, faces, edges, vertices, sketch profiles, and
   mixed picks.
 - Left-drag area selection stores all matched targets, not only the first hit.
-- Multiple bodies switch to Transform and expose only Move. Rotate, Mirror,
-  Delete, and Boolean commands stay hidden for multi-body selection.
-- Multiple sketch profiles switch to Modify and expose Move Sketch, Extrude
-  Sketch, New Body, and Delete Sketch.
+- Multiple bodies expose only Move plus currently valid Boolean actions.
+  Rotate, Mirror, and Delete stay hidden for multi-body selection.
+- Multiple sketch profiles expose Move, Extrude, New Body, and Delete Sketch.
 - Multiple faces, edges, vertices, or mixed selections show selection state and
   markers, but do not expose single-topology commands until a supported
   multi-command exists.
@@ -77,14 +73,14 @@ candidate.
 
 | User Clicks | Active Category | HUD Selection | Context Hint | Status |
 | --- | --- | --- | --- | --- |
-| Body/object | Transform | `Selection: object 0` | `Body selected - choose Move` | `Selected body <id>` |
-| Body face | Modify | `Selection: face <index>` | `Face selected - choose Push/Pull or Move Face` | `Selected face <index>` |
-| Body edge | Modify | `Selection: edge <index>` | `Edge selected - choose an available tool` | `Selected edge <index> (<px>px)` |
-| Body vertex | Modify | `Selection: vertex <index>` | `Vertex selected - choose an available tool` | `Selected vertex <index> (<px>px)` |
-| Sketch profile | Modify | `Selection: Sketch Profile` | `Sketch Profile selected - edit, move, Push/Pull, revolve, or delete` | `Selected Sketch Profile...` |
-| Multiple bodies | Transform | `Selection: objects (<count>)` | `Multiple bodies selected - choose Move` | `Selected <count> bodies...` |
-| Multiple sketch profiles | Modify | `Selection: Sketch Profiles (<count>)` | `Multiple sketch profiles selected - choose Move, Push/Pull, New Body, or Delete` | `Selected <count> sketch profiles...` |
-| Sketch entity | Modify/browser selection | sketch entity/object selection | `Sketch entity selected` | `Selected Sketch` |
+| Body/object | Select | `Selection: object 0` | `Body selected - choose Move` | `Selected body <id>` |
+| Body face | Select | `Selection: face <index>` | `Face selected - choose Extrude or Move` | `Selected face <index>` |
+| Body edge | Select | `Selection: edge <index>` | `Edge selected - choose an available tool` | `Selected edge <index> (<px>px)` |
+| Body vertex | Select | `Selection: vertex <index>` | `Vertex selected - choose an available tool` | `Selected vertex <index> (<px>px)` |
+| Sketch profile | Select | `Selection: Sketch Profile` | `Sketch Profile selected - edit, move, extrude, revolve, or delete` | `Selected Sketch Profile...` |
+| Multiple bodies | Select | `Selection: objects (<count>)` | `Multiple bodies selected - choose Move` | `Selected <count> bodies...` |
+| Multiple sketch profiles | Select | `Selection: Sketch Profiles (<count>)` | `Multiple sketch profiles selected - choose Move, Extrude, New Body, or Delete` | `Selected <count> sketch profiles...` |
+| Sketch entity | Select/browser selection | sketch entity/object selection | `Sketch entity selected` | `Selected Sketch` |
 
 ## Context Menus By Selection
 
@@ -95,13 +91,17 @@ panel, not shown as inert buttons.
 | Selection | Visible Command Panel | Enabled Properties Actions |
 | --- | --- | --- |
 | No selection, Select category | Object, Face, Edge, Vertex, Select Through | Object, Face, Edge, Vertex, Select Through |
-| Body/object | Move, Rotate, Rotate X, Rotate Y, Rotate Z, Mirror | Same list. Move axis is chosen from the viewport manipulator. |
-| Multiple bodies | Move | Same list. Move axis is chosen from the viewport manipulator. |
-| Face | New Sketch (Face Plane), Push/Pull, Move Face, Move Normal, Remove Face, Circle Boss, Circle Cut | Same list. Offset Face is planned and stays hidden until implemented. |
-| Edge | Fillet Edge, Chamfer Edge, Move Edge. Thread appears only for circular edges. | Fillet Edge, Chamfer Edge, Move Edge when the topology supports controlled edge move. Thread appears only for circular edges. |
-| Vertex | Move Vertex | Move Vertex when the topology supports controlled vertex move. |
-| Sketch profile | Edit Sketch, Edit Dimensions, Trim, Move Sketch, Push/Pull, New Body, Revolve, Revolve X, Revolve Y, Revolve Z, Delete Sketch. Hosted profiles expose Cut inside the active Push/Pull tool popover. | Same list. Revolve exposes numeric Angle and Elevation values. It must not show face `Extrude Face`. |
-| Multiple sketch profiles | Move Sketch, Push/Pull, New Body, Delete Sketch | Same list. |
+| Body/object | Selection mode controls, then Move, Rotate, Boolean actions when valid | Same list. Move axis is chosen from the viewport manipulator. |
+| Multiple bodies | Selection mode controls, then Move, Boolean actions when valid | Same list. Move axis is chosen from the viewport manipulator. |
+| Face | Selection mode controls, then Extrude, Move, Remove Face | Same list. Face circles are created in Sketch, then Extruded. |
+| Edge | Selection mode controls, then Move, Fillet/Chamfer. Thread appears only for circular edges. | Same list when the topology supports controlled edge move. Positive Fillet/Chamfer values fillet; negative values chamfer. |
+| Vertex | Selection mode controls, then Move | Move when the topology supports controlled vertex move. |
+| Sketch profile | Selection mode controls, then Edit Sketch, Move, Extrude, New Body, Revolve, Delete Sketch. Hosted profiles expose Cut inside the active Extrude tool popover. | Same list. Revolve exposes numeric Angle and Elevation values. Axis-specific Revolve X/Y/Z actions stay hidden. |
+| Multiple sketch profiles | Selection mode controls, then Move, Extrude, New Body, Delete Sketch | Same list. |
+
+The Select panel always keeps Object, Face, Edge, Vertex, and Select Through
+visible above selection-specific commands, so a user can recover from selecting
+the wrong topology without knowing keyboard shortcuts.
 
 Duck check: a face, edge, vertex, or sketch profile must never silently fall
 back to whole-body Delete, Move, Rotate, or Mirror.
@@ -113,20 +113,16 @@ Category rail clicks change command context only. They must not mutate geometry.
 | Category | Command Surface |
 | --- | --- |
 | Select | Object, Face, Edge, Vertex, Select Through |
-| Modify with no selection | No local modeling commands until topology is selected |
-| Sketch | Without an active sketch: New Sketch only. After New Sketch starts: Line, Arc, Circle, 3-Point Rect, Center Rect, Trim, Finish Sketch |
-| Boolean | Set Boolean Target when a body exists. Clear/union/subtract/intersect appear only when the current target/tool state makes them valid |
-| Transform | Body transform commands only when a body exists |
-| Measure | Distance appears when an edge is selected; no measurement commands appear with no selection |
-| View | Fit All, Home View, Shaded, Wireframe |
+| Sketch | Immediately starts a sketch. Active Sketch shows Line, Arc, Circle 2-Point, Center Radius, 3-Point Rect, Center Rect, Trim, Finish Sketch |
 
-File commands live in the main File menu and top/global chrome, not in the
-left category rail.
+Modify, Transform, Boolean, Measure, View, Create, and File are not left-rail
+modes. Boolean appears in body context; view/file actions live in top/global
+chrome.
 
 ## Browser And Properties Clicks
 
-- Clicking a body in the browser selects the body as Object and switches to
-  Transform.
+- Clicking a body in the browser selects the body as Object and shows body
+  context actions.
 - Clicking a sketch profile in the browser selects it as a Face-like profile
   target and shows profile commands.
 - Clicking a command row under Properties triggers the same QAction as the
@@ -136,20 +132,20 @@ left category rail.
 
 ## Sketch Clicks
 
-- In Sketch category without an active sketch, only New Sketch is available.
-  Line, Arc, Circle, Rectangle, and Trim must stay hidden/disabled until a
-  sketch session exists.
-- New Sketch starts on the bottom XY plane unless a planar face is selected.
+- Entering Sketch immediately starts on the bottom XY plane unless a planar
+  face is selected.
 - With a selected planar body face, New Sketch uses that face as workplane and
-  feature host so Push/Pull can add to or subtract from that body.
+  feature host so Extrude can add to or subtract from that body.
+- If the user leaves Sketch without drawing or dragging anything, the empty
+  sketch is discarded.
+- Circle has two sketch tools: Circle 2-Point and Center Radius.
 - Edit Sketch reopens the selected sketch geometry on its saved workplane so
   the user can continue drawing, trimming, or editing dimensions.
 - Edit Sketch and Trim are scoped by the selected sketch's `sketch_id`; another
   independent sketch on the same workplane must not be changed.
 - While a sketch session is active, left-click/drag draws with the active tool.
-- Choosing a draw tool without an active sketch must not silently create a
-  sketch. It may remember the pending tool, but the user must still explicitly
-  start New Sketch.
+- Choosing Sketch creates the sketch session; choosing draw tools only changes
+  the active sketch tool.
 - Right-click or Enter finishes the sketch sequence.
 - Trim is segment-click based. Selecting a whole sketch profile and choosing
   Trim enters trim mode; it must not delete the whole profile.
@@ -175,12 +171,13 @@ left category rail.
 
 When a modeling tool is active, normal selection clicks are suspended:
 
-- Push/Pull shows a drag arrow/manipulator and dimension value.
+- Extrude shows a drag arrow/manipulator and dimension value.
 - Move shows X/Y/Z viewport arrows. Clicking an arrow constrains the active
   move axis; dragging an arrow moves along that axis. Dragging away from arrows
   uses view-plane movement.
 - Move/Rotate/Fillet/Chamfer use left drag to preview and left release or Enter
-  to commit. Revolve uses Angle for rotation and Elevation for helical bodies.
+  to commit. Fillet/Chamfer is one tool: positive values fillet, negative values
+  chamfer. Revolve uses Angle for rotation and Elevation for helical bodies.
 - Esc cancels active tools.
 - The right panel must show `active_operation` context.
 - Command panel must show the active command and Cancel Tool.
@@ -189,23 +186,21 @@ When a modeling tool is active, normal selection clicks are suspended:
 
 Before changing click behavior, verify all items:
 
-- Selecting a body shows body transform commands, not face/edge commands.
-- Selecting a face shows face commands, `Push/Pull`, and `New Sketch (Face Plane)`.
-- Selecting an edge shows Fillet, Chamfer, and supported Move Edge; circular
+- Selecting a body shows Move, Rotate, and valid Boolean actions, not face/edge commands.
+- Selecting a face shows `Extrude`, `Move`, and `Remove Face`.
+- Selecting an edge shows `Move` and `Fillet/Chamfer`; circular
   edges also show Thread.
 - Thread must ask for a preset or Custom, representation
   (Modeled/Cosmetic), thread type (Auto/External/Internal), and numeric
   pitch/length/depth values before mutating the model.
-- Selecting a vertex shows supported Move Vertex only.
-- Selecting a sketch profile shows profile commands and `Push/Pull`, not
-  `Extrude Face`.
+- Selecting a vertex shows supported `Move` only.
+- Selecting a sketch profile shows profile commands and `Extrude`.
 - Ctrl-click multi-selection works for bodies, faces, edges, vertices, sketch
   profiles, and mixed picks.
-- Multiple selected bodies show only Move, and Move applies to every selected
-  body in one operation.
-- Multiple selected sketch profiles show Move Sketch, Push/Pull, New Body, and
-  Delete Sketch.
-- Entering Sketch mode shows New Sketch only; draw tools appear after New Sketch.
+- Multiple selected bodies show Move and valid Boolean actions; Move applies to
+  every selected body in one operation.
+- Multiple selected sketch profiles show Move, Extrude, New Body, and Delete Sketch.
+- Entering Sketch mode starts a sketch and shows draw tools.
 - Selection-mode buttons clear selection and do not mutate geometry.
 - Category rail clicks do not mutate geometry.
 - View/camera/display clicks do not mutate geometry.
