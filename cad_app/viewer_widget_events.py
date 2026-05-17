@@ -23,18 +23,30 @@ class ViewerWidgetEventMixin:
             QTimer.singleShot(0, self._display_initial_scene)
             QTimer.singleShot(100, self._refit_initial_scene)
             QTimer.singleShot(250, self._position_orientation_gizmo_overlay)
+        # Qt.Tool top-level overlays (move manipulator, selection box)
+        # like to appear together with the parent on the first show
+        # event regardless of their __init__ hide(). Force them off
+        # until a move/extrude tool actually starts.
+        if hasattr(self, "_move_manipulator_overlay"):
+            self._move_manipulator_overlay.hide()
+        if hasattr(self, "_selection_box_overlay"):
+            self._selection_box_overlay.hide()
+        if hasattr(self, "_tool_popover"):
+            self._tool_popover.hide()
         super().showEvent(event)
 
     def resizeEvent(self, event) -> None:
         self._viewer.resize()
         self._position_context_hint()
         self._position_edge_dimension_editor()
+        self._position_grid_axis_labels_overlay()
         self._position_orientation_gizmo_overlay()
         self._position_move_manipulator_overlay()
         self._position_selection_box_overlay()
         self._position_sketch_plane_chooser()
         self._position_tool_popover()
         super().resizeEvent(event)
+        self._schedule_viewport_resize_refresh()
 
     def focusInEvent(self, event) -> None:
         self._schedule_viewport_activation_refresh()
@@ -61,6 +73,38 @@ class ViewerWidgetEventMixin:
         QTimer.singleShot(0, self._refresh_viewport_after_activation)
         QTimer.singleShot(120, self._refresh_viewport_after_activation)
 
+    def _schedule_viewport_resize_refresh(self) -> None:
+        if not self._viewer.is_initialized:
+            return
+        self._refresh_viewport_after_resize()
+        QTimer.singleShot(0, self._refresh_viewport_after_resize)
+        QTimer.singleShot(90, self._refresh_viewport_after_resize)
+        QTimer.singleShot(240, self._refresh_viewport_after_resize_rebind)
+        QTimer.singleShot(420, self._refresh_viewport_after_resize)
+        QTimer.singleShot(700, self._refresh_viewport_after_resize_rebind)
+        QTimer.singleShot(1100, self._refresh_viewport_after_resize)
+
+    def _refresh_viewport_after_resize(self) -> None:
+        if not self._viewer.is_initialized:
+            return
+        self._viewer.refresh_native_window()
+        self._position_edge_dimension_editor()
+        self._position_grid_axis_labels_overlay()
+        self._position_orientation_gizmo_overlay()
+        self._position_move_manipulator_overlay()
+        self._position_selection_box_overlay()
+        self._position_sketch_plane_chooser()
+        self._position_tool_popover()
+        self.update()
+
+    def _refresh_viewport_after_resize_rebind(self) -> None:
+        if not self._viewer.is_initialized:
+            return
+        self._viewer.refresh_native_window(rebind=True)
+        self._position_grid_axis_labels_overlay()
+        self._position_orientation_gizmo_overlay()
+        self.update()
+
     def _refresh_viewport_after_activation(self) -> None:
         if not self._viewer.is_initialized:
             return
@@ -82,9 +126,41 @@ class ViewerWidgetEventMixin:
             self._set_context_hint("Start: New Sketch, or import STEP from File")
         else:
             self._set_context_hint("Select geometry, then choose an available action")
+        # If we already entered sketch mode before the viewer was ready
+        # (the common empty-project startup path), align the camera with
+        # the workplane now so the user draws on a flat 2D-looking grid
+        # instead of a tilted isometric projection.
+        if self._sketch_session is not None:
+            self._navigation.view_workplane(self._sketch_session.workplane)
+            self._viewer.display_sketch_plane_marker(self._sketch_session.workplane)
         self._navigation.capture_home()
+        self._position_grid_axis_labels_overlay()
         self._position_orientation_gizmo_overlay()
+        # Make sure no move/extrude affordance leaks into the startup
+        # screen. _position_move_manipulator_overlay hides itself when
+        # no session owns it.
+        self._position_move_manipulator_overlay()
+        if hasattr(self, "_selection_box_overlay"):
+            self._selection_box_overlay.hide()
         QTimer.singleShot(0, self._position_orientation_gizmo_overlay)
+        QTimer.singleShot(0, self._position_move_manipulator_overlay)
+        QTimer.singleShot(220, self._finish_initial_scene_display)
+        LOGGER.info("Initial scene display queued for native refresh")
+
+    def _finish_initial_scene_display(self) -> None:
+        if self._initial_scene_displayed or not self._viewer.is_initialized:
+            return
+        self._viewer.resize()
+        self._viewer.update_view()
+        self._viewer.refresh_native_window()
+        self._position_grid_axis_labels_overlay()
+        self._position_orientation_gizmo_overlay()
+        window = self.window()
+        if window is not None and window.isVisible():
+            window.raise_()
+            window.activateWindow()
+            self.setFocus()
+        self._schedule_viewport_activation_refresh()
         self._initial_scene_displayed = True
         LOGGER.info("Initial scene display finished")
 
@@ -94,8 +170,15 @@ class ViewerWidgetEventMixin:
         self._viewer.fit_all()
         self._viewer.update_view()
         self._navigation.capture_home()
+        self._position_grid_axis_labels_overlay()
         self._position_orientation_gizmo_overlay()
         self._position_sketch_plane_chooser()
+
+    def _position_grid_axis_labels_overlay(self) -> None:
+        # Grid labels are native AIS_TextLabel objects. Qt child labels over the
+        # native OCC window can black out the viewport after maximize/resize on
+        # Windows, so this hook intentionally stays a no-op.
+        return
 
     def _position_orientation_gizmo_overlay(self) -> None:
         if not hasattr(self, "_orientation_gizmo_overlay"):
@@ -138,6 +221,19 @@ class ViewerWidgetEventMixin:
             event.accept()
             return
         if event.button() == Qt.LeftButton and self._move_session is not None:
+            # Shift + left-click during a Rotate session re-picks the
+            # rotation pivot from whatever vertex / edge / face is under
+            # the cursor, giving the user a "movable pivot" without
+            # exiting the tool.
+            if (
+                event.modifiers() & Qt.ShiftModifier
+                and self._move_session.tool == "rotate"
+                and self._set_rotate_pivot_from_click(position.x(), position.y())
+            ):
+                event.accept()
+                return
+            if hasattr(self, "_set_topology_move_view_fallback"):
+                self._set_topology_move_view_fallback()
             self._begin_move_drag(position.x(), position.y())
             event.accept()
             return
@@ -160,14 +256,29 @@ class ViewerWidgetEventMixin:
                 self._orientation_gizmo_dragging = True
                 self._navigation.begin_orbit(start_x, start_y)
             self._navigation.orbit_to(position.x(), position.y())
+            if self._move_session is not None and hasattr(
+                self, "_refresh_move_manipulator"
+            ):
+                self._refresh_move_manipulator()
             event.accept()
             return
         if event.buttons() & Qt.RightButton:
             self._navigation.pan_to(position.x(), position.y())
+            # Keep manipulator arrows aligned with the camera while the
+            # user pans/orbits live; the screen projection of world
+            # X/Y/Z changes every frame.
+            if self._move_session is not None and hasattr(
+                self, "_refresh_move_manipulator"
+            ):
+                self._refresh_move_manipulator()
             event.accept()
             return
         if event.buttons() & Qt.MiddleButton:
             self._navigation.orbit_to(position.x(), position.y())
+            if self._move_session is not None and hasattr(
+                self, "_refresh_move_manipulator"
+            ):
+                self._refresh_move_manipulator()
             event.accept()
             return
         if self._move_session is not None and event.buttons() & Qt.LeftButton:
@@ -213,10 +324,7 @@ class ViewerWidgetEventMixin:
                 )
                 if view_target is not None:
                     axis, positive, label = view_target
-                    self._navigation.view_axis(axis, positive=positive)
-                    self._navigation.capture_home()
-                    self._refresh_overlays_after_camera_change()
-                    self._show_status(f"View: {label}")
+                    self._apply_orientation_gizmo_target(axis, positive, label)
             self._orientation_gizmo_press = None
             self._orientation_gizmo_dragging = False
             event.accept()
@@ -261,11 +369,26 @@ class ViewerWidgetEventMixin:
             position.y(),
         )
         self._position_edge_dimension_editor()
+        # Zoom changes the on-screen scale of the move manipulator's
+        # axis vectors; re-project them so the X/Y/Z arrows stay
+        # accurate after a wheel zoom.
+        if self._move_session is not None and hasattr(
+            self, "_refresh_move_manipulator"
+        ):
+            self._refresh_move_manipulator()
         event.accept()
 
     def _refresh_overlays_after_camera_change(self) -> None:
         self._position_edge_dimension_editor()
-        self._position_move_manipulator_overlay()
+        self._position_grid_axis_labels_overlay()
+        # Re-project the X/Y/Z arrows for the active move/rotate tool.
+        # Without this the manipulator stays pinned to its arrows'
+        # original screen vectors and ends up pointing the wrong way
+        # after the user orbits or zooms the camera.
+        if hasattr(self, "_refresh_move_manipulator"):
+            self._refresh_move_manipulator()
+        else:
+            self._position_move_manipulator_overlay()
         if self._move_session is not None:
             self._update_extrude_affordance()
             self._update_move_preview()
@@ -356,7 +479,10 @@ class ViewerWidgetEventMixin:
             self._set_sketch_tool("center_rectangle")
             return
         if self._sketch_session is not None and event.key() == Qt.Key_C:
-            self._set_sketch_tool("circle")
+            if event.modifiers() & Qt.ShiftModifier:
+                self._set_sketch_tool("circle_diameter")
+            else:
+                self._set_sketch_tool("circle")
             return
         if event.key() == Qt.Key_E:
             if event.modifiers() & Qt.ShiftModifier:
@@ -365,20 +491,13 @@ class ViewerWidgetEventMixin:
                 self._begin_push_pull_tool()
             return
         if event.key() == Qt.Key_G:
-            self._begin_context_move_tool()
+            self._begin_unified_move_tool()
             return
         if event.key() == Qt.Key_M:
-            self._begin_selected_move_tool()
+            self._begin_unified_move_tool()
             return
         if event.key() == Qt.Key_R:
-            self._begin_fillet_tool()
-            return
-        if event.key() == Qt.Key_C:
-            self._begin_chamfer_tool()
-            return
-        if event.key() == Qt.Key_O:
-            cut = bool(event.modifiers() & Qt.ShiftModifier)
-            self._circle_feature_on_selected_face(cut=cut)
+            self._begin_fillet_chamfer_tool()
             return
         super().keyPressEvent(event)
 
@@ -476,7 +595,7 @@ class ViewerWidgetEventMixin:
             selected_profile = is_sketch_profile(
                 self._scene.get(selection.item_id).meta
             )
-            self._active_category = "modify"
+            self._active_category = "select"
             self._viewer.clear_selection(redraw=False)
             self._viewer.clear_hover_marker(redraw=False)
             if selected_profile:
@@ -505,9 +624,7 @@ class ViewerWidgetEventMixin:
                         "Face selected - edit dimensions, extrude, or move face"
                     )
                 else:
-                    self._set_context_hint(
-                        "Face selected - choose Extrude Face or Move Face"
-                    )
+                    self._set_context_hint("Face selected - choose Extrude or Move")
                 self._show_status(f"Selected face {selection .index }")
             self._refresh_hud()
             if pick_result is not None:
@@ -519,7 +636,7 @@ class ViewerWidgetEventMixin:
                 )
             return
         if selection.kind == SelectionKind.OBJECT:
-            self._active_category = "transform"
+            self._active_category = "select"
             self._viewer.clear_selection(redraw=False)
             self._viewer.clear_hover_marker(redraw=False)
             if self._box_dimensions_editable(selection.item_id):
@@ -533,7 +650,7 @@ class ViewerWidgetEventMixin:
                 )
             )
             if self._box_dimensions_editable(selection.item_id):
-                self._set_context_hint("Body selected - edit dimensions or move")
+                self._set_context_hint("Body selected - choose Move or Rotate")
             else:
                 self._set_context_hint("Body selected - choose Move")
             self._show_status(f"Selected body {selection .item_id [:8 ]}")
@@ -550,7 +667,7 @@ class ViewerWidgetEventMixin:
         self._viewer.clear_hover_marker(redraw=False)
         self._viewer.clear_dimension_label(redraw=False)
         self._hide_edge_dimension_editor()
-        self._active_category = "modify"
+        self._active_category = "select"
         scene_object = self._scene.get(selection.item_id)
         self._viewer.display_selection_marker(
             self._picker.subshape(selection.item_id, selection.kind, selection.index),
@@ -565,12 +682,10 @@ class ViewerWidgetEventMixin:
         if selection.kind == SelectionKind.EDGE and edge_measurement is not None:
             if self._selected_edge_is_circular():
                 self._set_context_hint(
-                    "Circular edge selected - Thread, Measure, Fillet, or Chamfer"
+                    "Circular edge selected - Move, Fillet/Chamfer, or Thread"
                 )
             else:
-                self._set_context_hint(
-                    "Edge selected - Measure, Edit Length, Fillet, Chamfer, or Move"
-                )
+                self._set_context_hint("Edge selected - choose Move or Fillet/Chamfer")
         else:
             self._set_context_hint(
                 f"{selection .kind .value .title ()} selected - "
@@ -678,10 +793,10 @@ class ViewerWidgetEventMixin:
         kinds = {selection.kind for selection in selections}
         count = len(selections)
         if all(is_sketch_profile(meta) for meta in metas):
-            self._active_category = "modify"
+            self._active_category = "select"
             self._selection_kind = SelectionKind.FACE
             self._set_context_hint(
-                "Multiple sketch profiles selected - choose Move, Extrude Sketch, "
+                "Multiple sketch profiles selected - choose Move, Extrude, "
                 "New Body, or Delete"
             )
             status = f"Selected {count} sketch profiles"
@@ -690,20 +805,20 @@ class ViewerWidgetEventMixin:
             and SelectionKind.OBJECT in kinds
             and all(not is_sketch_object(meta) for meta in metas)
         ):
-            self._active_category = "transform"
+            self._active_category = "select"
             self._selection_kind = SelectionKind.OBJECT
             self._set_context_hint("Multiple bodies selected - choose Move")
             status = f"Selected {count} bodies"
         elif len(kinds) == 1:
             kind = next(iter(kinds))
-            self._active_category = "modify"
+            self._active_category = "select"
             self._selection_kind = kind
             self._set_context_hint(
                 f"Multiple {kind.value}s selected - choose an available tool"
             )
             status = f"Selected {count} {kind.value}s"
         else:
-            self._active_category = "modify"
+            self._active_category = "select"
             self._set_context_hint("Multiple mixed items selected")
             status = f"Selected {count} items"
         if action == "removed":
@@ -948,3 +1063,57 @@ class ViewerWidgetEventMixin:
     def _to_view_pixels(self, x: int, y: int) -> tuple[int, int]:
         scale = self.devicePixelRatioF()
         return int(round(x * scale)), int(round(y * scale))
+
+    def _set_rotate_pivot_from_click(self, x: int, y: int) -> bool:
+        """Shift+click while in Rotate: re-pick the pivot from whatever
+        vertex / edge / face is under the cursor. Returns True if a pivot
+        was set (so the caller knows to consume the event)."""
+        if self._move_session is None or self._move_session.tool != "rotate":
+            return False
+        if not self._viewer.is_initialized:
+            return False
+        view_x, view_y = self._to_view_pixels(x, y)
+        # Prefer the smallest topological feature near the cursor:
+        # vertex > edge > face. select_through gives us all hits at once.
+        candidates = self._picker.pick_candidates_at(
+            self._viewer.view, view_x, view_y, "all", select_through=True
+        )
+        if not candidates:
+            self._show_status("Pivot: no subshape under the cursor")
+            return False
+        rank = {
+            SelectionKind.VERTEX: 0,
+            SelectionKind.EDGE: 1,
+            SelectionKind.FACE: 2,
+        }
+        candidates_ranked = sorted(
+            (c for c in candidates if c.selection.kind in rank),
+            key=lambda c: (rank[c.selection.kind], c.distance_px),
+        )
+        if not candidates_ranked:
+            self._show_status("Pivot: pick a vertex, edge or face")
+            return False
+        ref = candidates_ranked[0].selection
+        pivot = None
+        if ref.kind == SelectionKind.FACE:
+            try:
+                pivot = self._face_center(ref.item_id, ref.index)
+            except (CommandError, IndexError, RuntimeError, ValueError):
+                pivot = None
+        else:
+            try:
+                shape = self._picker.subshape(ref.item_id, ref.kind, ref.index)
+                pivot = self._shape_center(shape)
+            except (CommandError, IndexError, RuntimeError, ValueError):
+                pivot = None
+        if pivot is None:
+            self._show_status("Pivot: could not resolve a point from selection")
+            return False
+        self._move_session.axis_point = pivot
+        self._update_move_preview()
+        self._refresh_hud()
+        self._show_status(
+            f"Pivot moved to {ref.kind.value} ({pivot[0]:.1f}, {pivot[1]:.1f}, "
+            f"{pivot[2]:.1f})"
+        )
+        return True

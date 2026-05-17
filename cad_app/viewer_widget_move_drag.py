@@ -68,8 +68,8 @@ class ViewerWidgetMoveDragMixin(ViewerWidgetMovePreviewMixin):
             self._show_status("Rotate preview")
         elif self._move_session.tool == "sketch_revolve":
             self._show_status("Revolve preview")
-        elif self._move_session.tool in {"fillet", "chamfer"}:
-            self._show_status(f"{self ._move_session .tool .title ()} preview")
+        elif self._move_session.tool in {"fillet", "chamfer", "fillet_chamfer"}:
+            self._show_status(f"{self ._move_tool_name (self ._move_session )} preview")
         else:
             self._show_status("Move preview")
 
@@ -237,10 +237,32 @@ class ViewerWidgetMoveDragMixin(ViewerWidgetMovePreviewMixin):
         self,
         session: MoveSession,
     ) -> tuple[float, float] | None:
-        if session.tool in {"fillet", "chamfer"}:
+        if session.tool in {"fillet", "chamfer", "fillet_chamfer"}:
             return EXTRUDE_DRAG_FALLBACK_AXIS
         if session.tool in {"rotate", "sketch_revolve"}:
             return ROTATE_DRAG_FALLBACK_AXIS
+        if session.tool in {"move", "sketch_move"} and session.axis_name != "View":
+            if not self._viewer.is_initialized:
+                return None
+            try:
+                anchor = self._move_anchor_point(session)
+                if anchor is None:
+                    return None
+                start_x, start_y = self._viewer.view.Convert(*anchor)
+                endpoint = (
+                    anchor[0] + session.axis[0] * EXTRUDE_DRAG_PROBE_DISTANCE,
+                    anchor[1] + session.axis[1] * EXTRUDE_DRAG_PROBE_DISTANCE,
+                    anchor[2] + session.axis[2] * EXTRUDE_DRAG_PROBE_DISTANCE,
+                )
+                end_x, end_y = self._viewer.view.Convert(*endpoint)
+            except (CommandError, IndexError, RuntimeError, ValueError) as exc:
+                LOGGER.debug(
+                    "Move drag axis projection failed: %s",
+                    exc,
+                    exc_info=True,
+                )
+                return None
+            return _normalize_screen_axis(end_x - start_x, end_y - start_y)
         if session.tool not in {"extrude", "sketch_extrude"}:
             return None
         if not self._viewer.is_initialized or session.index is None:
@@ -384,8 +406,12 @@ class ViewerWidgetMoveDragMixin(ViewerWidgetMovePreviewMixin):
                 status=f"{self ._move_tool_name (session )} failed"
             )
             return
-        self._move_session = None
-        self._scene.set_selection(None)
+        keep_move_active = self._keep_move_session_active_after_commit(session)
+        if keep_move_active:
+            self._reset_committed_move_session(session)
+            self._move_session = session
+        else:
+            self._move_session = None
         self._hover_selection = None
         self._hide_edge_dimension_editor()
         self._viewer.clear_preview_marker()
@@ -393,6 +419,15 @@ class ViewerWidgetMoveDragMixin(ViewerWidgetMovePreviewMixin):
         self._viewer.clear_extrude_affordance_marker()
         if self._viewer.is_initialized:
             self._viewer.display_scene(self._scene, fit=False)
+            if session.tool in {"sketch_extrude", "sketch_revolve"}:
+                # Sketch-on-Face left the camera perpendicular to the
+                # workplane via view_workplane(); restore the user's
+                # original camera so the new body shows up exactly the
+                # way they were looking before the sketch started. If
+                # they did not enter a workplane (extrude from an
+                # existing body face without a sketch reset), the call
+                # is a no-op and their orbit/pan is preserved.
+                self._navigation.restore_pre_sketch_view()
         if (
             session.tool == "sketch_extrude"
             and session.operation == "new_body"
@@ -403,8 +438,19 @@ class ViewerWidgetMoveDragMixin(ViewerWidgetMovePreviewMixin):
                 "Subtract, or Intersect."
             )
         else:
-            self._set_context_hint("Operation applied")
-        self._show_status(f"{self ._move_tool_name (session )} applied")
+            self._set_context_hint(
+                self._move_continue_hint(session)
+                if keep_move_active
+                else "Operation applied"
+            )
+        self._show_status(
+            f"{self ._move_tool_name (session )} applied"
+            if not keep_move_active
+            else f"{self ._move_tool_name (session )} applied - drag again"
+        )
+        self._refresh_move_manipulator()
+        self._refresh_hud()
+        self._refresh_action_state()
         LOGGER.info(
             "%s tool applied kind=%s item_id=%s index=%s distance=%.2f axis=%s",
             self._move_tool_name(session),
@@ -416,19 +462,48 @@ class ViewerWidgetMoveDragMixin(ViewerWidgetMovePreviewMixin):
         )
 
     @staticmethod
+    def _keep_move_session_active_after_commit(session: MoveSession) -> bool:
+        return session.tool in {"move", "sketch_move"} and (
+            session.target_kind == "object"
+            or session.target_kind == SelectionKind.OBJECT
+        )
+
+    @staticmethod
+    def _reset_committed_move_session(session: MoveSession) -> None:
+        session.distance = 0.0
+        session.drag_start = None
+        session.drag_origin_distance = 0.0
+        session.drag_screen_axis = None
+        session.vector = None
+        session.drag_origin_vector = (0.0, 0.0, 0.0)
+        session.drag_view_anchor = None
+        session.drag_view_normal = None
+        session.drag_view_start_point = None
+
+    @staticmethod
+    def _move_continue_hint(session: MoveSession) -> str:
+        if session.axis_name == "View":
+            return "Move: drag in view again, Enter apply, Esc cancel"
+        return f"Move {session.axis_name}: drag again, Enter apply, Esc cancel"
+
+    @staticmethod
     def _move_tool_name(session: MoveSession) -> str:
         if session.tool == "sketch_extrude":
             if session.operation == "cut":
-                return "Push/Pull Cut"
+                return "Extrude Cut"
             if session.operation == "new_body":
                 return "New Body"
-            return "Push/Pull"
+            return "Extrude"
         if session.tool == "extrude":
-            return "Push/Pull"
+            return "Extrude"
         if session.tool == "sketch_revolve":
             return "Sketch Revolve"
         if session.tool == "sketch_move":
-            return "Sketch Move"
+            return "Move"
+        if session.tool == "fillet_chamfer":
+            if session.distance >= 0.0:
+                return "Fillet"
+            return "Chamfer"
         return session.tool.replace("_", " ").title()
 
     def _apply_move_session(self, session: MoveSession) -> None:
@@ -473,7 +548,13 @@ class ViewerWidgetMoveDragMixin(ViewerWidgetMovePreviewMixin):
             )
             return
         if session.tool == "rotate":
-            center = self._shape_center(self._scene.get(session.item_id).shape)
+            # Use the session's pivot if the caller set one (e.g. when a
+            # vertex / edge / face was selected together with the body to
+            # define a custom rotation centre). Otherwise fall back to the
+            # body's bounding-box centre, the historical behaviour.
+            center = session.axis_point or self._shape_center(
+                self._scene.get(session.item_id).shape
+            )
             if center is None:
                 raise CommandError("Rotate center unavailable.")
             apply_rotate_object(
@@ -499,6 +580,22 @@ class ViewerWidgetMoveDragMixin(ViewerWidgetMovePreviewMixin):
                 session.index,
                 distance=session.distance,
             )
+            return
+        if session.tool == "fillet_chamfer":
+            if session.distance > 0.0:
+                apply_fillet_edge(
+                    self._scene,
+                    session.item_id,
+                    session.index,
+                    radius=session.distance,
+                )
+            else:
+                apply_chamfer_edge(
+                    self._scene,
+                    session.item_id,
+                    session.index,
+                    distance=abs(session.distance),
+                )
             return
         if session.target_kind == "object":
             dx, dy, dz = self._move_vector(session)

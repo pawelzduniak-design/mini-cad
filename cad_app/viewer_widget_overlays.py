@@ -17,9 +17,10 @@ class OrientationGizmoOverlay(QWidget):
         super().__init__(parent)
         self.setObjectName("OrientationGizmoOverlay")
         self.setFixedSize(156, 156)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self._axis_name = "X"
+        self._press_parent_pos: tuple[int, int] | None = None
+        self._dragging = False
 
     def set_axis_name(self, axis_name: str) -> None:
         self._axis_name = axis_name
@@ -62,12 +63,11 @@ class OrientationGizmoOverlay(QWidget):
 
         label_font = QFont(self.font())
         label_font.setBold(True)
-        label_font.setPointSize(8)
+        label_font.setPointSize(10)
         painter.setFont(label_font)
         self._draw_labeled_text(painter, QRectF(64, 43, 42, 18), "Top")
         self._draw_labeled_text(painter, QRectF(48, 74, 34, 18), "Front")
         self._draw_labeled_text(painter, QRectF(86, 74, 40, 18), "Right")
-        self._draw_view_buttons(painter)
 
         self._draw_axis(
             painter,
@@ -99,17 +99,20 @@ class OrientationGizmoOverlay(QWidget):
         color: QColor,
         label: str,
     ) -> None:
-        pen = QPen(color, 3.0 if self._axis_name == label else 2.2)
+        pen = QPen(color, 4.0 if self._axis_name == label else 3.0)
         pen.setCapStyle(Qt.RoundCap)
         painter.setPen(pen)
         painter.drawLine(start, end)
         painter.setBrush(color)
         painter.setPen(Qt.NoPen)
-        painter.drawEllipse(end, 4.0, 4.0)
-        painter.setPen(color)
-        painter.drawText(
-            QRectF(end.x() - 10, end.y() - 20, 20, 18),
-            Qt.AlignCenter,
+        painter.drawEllipse(end, 5.5, 5.5)
+        axis_font = QFont(painter.font())
+        axis_font.setBold(True)
+        axis_font.setPointSize(11)
+        painter.setFont(axis_font)
+        self._draw_labeled_text(
+            painter,
+            QRectF(end.x() - 13, end.y() - 25, 26, 22),
             label,
         )
 
@@ -125,7 +128,7 @@ class OrientationGizmoOverlay(QWidget):
     def _draw_view_buttons(self, painter: QPainter) -> None:
         font = QFont(self.font())
         font.setBold(True)
-        font.setPointSize(7)
+        font.setPointSize(9)
         painter.setFont(font)
         for label, rect in self._view_button_rects().items():
             painter.setPen(QPen(QColor(92, 111, 128), 1.1))
@@ -139,6 +142,72 @@ class OrientationGizmoOverlay(QWidget):
             if rect.contains(point):
                 return self._view_target(label)
         return self._cube_view_at(point)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() != Qt.LeftButton:
+            super().mousePressEvent(event)
+            return
+        parent_pos = self._event_position_in_parent(event)
+        self._press_parent_pos = (
+            int(round(parent_pos.x())),
+            int(round(parent_pos.y())),
+        )
+        self._dragging = False
+        event.accept()
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._press_parent_pos is None or not (event.buttons() & Qt.LeftButton):
+            super().mouseMoveEvent(event)
+            return
+        parent = self.parentWidget()
+        parent_pos = self._event_position_in_parent(event)
+        distance = math.hypot(
+            parent_pos.x() - self._press_parent_pos[0],
+            parent_pos.y() - self._press_parent_pos[1],
+        )
+        if not self._dragging:
+            if distance < 4.0:
+                event.accept()
+                return
+            self._dragging = True
+            if parent is not None and hasattr(parent, "_navigation"):
+                parent._navigation.begin_orbit(*self._press_parent_pos)
+        if parent is not None and hasattr(parent, "_navigation"):
+            parent._navigation.orbit_to(
+                int(round(parent_pos.x())),
+                int(round(parent_pos.y())),
+            )
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() != Qt.LeftButton or self._press_parent_pos is None:
+            super().mouseReleaseEvent(event)
+            return
+        parent = self.parentWidget()
+        if self._dragging:
+            if parent is not None and hasattr(parent, "_navigation"):
+                parent._navigation.end_orbit()
+            if parent is not None and hasattr(parent, "_show_status"):
+                parent._show_status("Orbit view")
+        else:
+            target = self.view_at(
+                int(round(event.position().x())),
+                int(round(event.position().y())),
+            )
+            if target is not None and parent is not None:
+                axis, positive, label = target
+                if hasattr(parent, "_apply_orientation_gizmo_target"):
+                    parent._apply_orientation_gizmo_target(axis, positive, label)
+        self._press_parent_pos = None
+        self._dragging = False
+        event.accept()
+
+    def _event_position_in_parent(self, event) -> QPointF:
+        parent = self.parentWidget()
+        local_pos = event.position().toPoint()
+        if parent is None:
+            return QPointF(float(local_pos.x()), float(local_pos.y()))
+        return QPointF(parent.mapFromGlobal(self.mapToGlobal(local_pos)))
 
     @staticmethod
     def _view_button_rects() -> dict[str, QRectF]:
@@ -211,13 +280,44 @@ class MoveManipulatorOverlay(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("MoveManipulatorOverlay")
+        self.setWindowFlags(
+            Qt.Tool | Qt.FramelessWindowHint | Qt.WindowDoesNotAcceptFocus
+        )
         self.setFixedSize(156, 156)
         self.setMouseTracking(True)
         self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_AlwaysStackOnTop)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
         self._active_axis: str | None = None
         self._press_parent_pos: tuple[int, int] | None = None
         self._dragging = False
+        self._mode = "move"
+        self._axis_directions: dict[str, QPointF] | None = None
         self.hide()
+
+    def set_mode(self, mode: str) -> None:
+        normalized = "rotate" if mode == "rotate" else "move"
+        if normalized == self._mode:
+            return
+        self._mode = normalized
+        self.update()
+
+    def set_axis_directions(
+        self,
+        axis_directions: dict[str, tuple[float, float]] | None,
+    ) -> None:
+        if axis_directions is None:
+            self._axis_directions = None
+            self.update()
+            return
+        directions: dict[str, QPointF] = {}
+        for axis, direction in axis_directions.items():
+            length = math.hypot(direction[0], direction[1])
+            if length <= 1e-7:
+                continue
+            directions[axis] = QPointF(direction[0] / length, direction[1] / length)
+        self._axis_directions = directions or None
+        self.update()
 
     def paintEvent(self, event) -> None:
         del event
@@ -226,6 +326,9 @@ class MoveManipulatorOverlay(QWidget):
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(14, 20, 27, 110))
         painter.drawEllipse(QPointF(78, 78), 18, 18)
+        if self._mode == "rotate":
+            self._draw_rotate_rings(painter)
+            return
         for axis, end, color in self._axis_specs():
             self._draw_axis(painter, axis, end, color)
 
@@ -240,7 +343,7 @@ class MoveManipulatorOverlay(QWidget):
         parent = self.parentWidget()
         if parent is not None and hasattr(parent, "_set_move_axis_from_manipulator"):
             parent._set_move_axis_from_manipulator(axis)
-        parent_pos = self.mapToParent(event.position().toPoint())
+        parent_pos = self._event_position_in_parent(event)
         self._active_axis = axis
         self._press_parent_pos = (parent_pos.x(), parent_pos.y())
         self._dragging = False
@@ -256,7 +359,7 @@ class MoveManipulatorOverlay(QWidget):
         parent = self.parentWidget()
         if parent is None:
             return
-        parent_pos = self.mapToParent(event.position().toPoint())
+        parent_pos = self._event_position_in_parent(event)
         distance = math.hypot(
             parent_pos.x() - self._press_parent_pos[0],
             parent_pos.y() - self._press_parent_pos[1],
@@ -292,13 +395,22 @@ class MoveManipulatorOverlay(QWidget):
         super().mouseReleaseEvent(event)
 
     def axis_at(self, position: QPointF) -> str | None:
+        if self._mode == "rotate":
+            return self._ring_axis_at(position)
         center = QPointF(78, 78)
         for axis, end, _color in self._axis_specs():
-            if self._distance_to_segment(position, center, end) <= 9.0:
+            if self._distance_to_segment(position, center, end) <= 12.0:
                 return axis
-            if math.hypot(position.x() - end.x(), position.y() - end.y()) <= 12.0:
+            if math.hypot(position.x() - end.x(), position.y() - end.y()) <= 16.0:
                 return axis
         return None
+
+    def _event_position_in_parent(self, event) -> QPointF:
+        parent = self.parentWidget()
+        local_pos = event.position().toPoint()
+        if parent is None:
+            return QPointF(float(local_pos.x()), float(local_pos.y()))
+        return QPointF(parent.mapFromGlobal(self.mapToGlobal(local_pos)))
 
     def _draw_axis(
         self,
@@ -321,22 +433,100 @@ class MoveManipulatorOverlay(QWidget):
             head_base.x() - normal.x() * 6,
             head_base.y() - normal.y() * 6,
         )
-        painter.setPen(QPen(QColor(0, 0, 0, 170), 6.0, Qt.SolidLine, Qt.RoundCap))
+        painter.setPen(QPen(QColor(0, 0, 0, 190), 7.0, Qt.SolidLine, Qt.RoundCap))
         painter.drawLine(center, end)
-        painter.setPen(QPen(color, 3.4, Qt.SolidLine, Qt.RoundCap))
+        painter.setPen(QPen(color, 4.2, Qt.SolidLine, Qt.RoundCap))
         painter.drawLine(center, end)
         painter.setBrush(color)
         painter.setPen(Qt.NoPen)
         painter.drawPolygon([end, head_left, head_right])
-        painter.setPen(color)
-        painter.drawText(
-            QRectF(end.x() - 10, end.y() - 24, 20, 18),
-            Qt.AlignCenter,
-            axis,
+        font = QFont(painter.font())
+        font.setBold(True)
+        font.setPointSize(11)
+        painter.setFont(font)
+        label_center = QPointF(end.x() + unit.x() * 12, end.y() + unit.y() * 12)
+        label_center = QPointF(
+            min(max(label_center.x(), 14.0), self.width() - 14.0),
+            min(max(label_center.y(), 14.0), self.height() - 14.0),
         )
+        label_rect = QRectF(label_center.x() - 14, label_center.y() - 11, 28, 22)
+        shadow_rect = QRectF(label_rect)
+        shadow_rect.translate(1.2, 1.2)
+        painter.setPen(QColor(0, 0, 0, 230))
+        painter.drawText(shadow_rect, Qt.AlignCenter, axis)
+        painter.setPen(color)
+        painter.drawText(label_rect, Qt.AlignCenter, axis)
+
+    def _draw_rotate_rings(self, painter: QPainter) -> None:
+        rings = (
+            ("X", QRectF(25, 53, 106, 50), QColor(226, 74, 64)),
+            ("Y", QRectF(47, 24, 62, 108), QColor(74, 196, 94)),
+            ("Z", QRectF(26, 26, 104, 104), QColor(60, 145, 245)),
+        )
+        for axis, rect, color in rings:
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor(0, 0, 0, 190), 6.0))
+            painter.drawEllipse(rect)
+            painter.setPen(QPen(color, 3.2))
+            painter.drawEllipse(rect)
+            label_rect = self._ring_label_rect(axis)
+            shadow_rect = QRectF(label_rect)
+            shadow_rect.translate(1.2, 1.2)
+            font = QFont(painter.font())
+            font.setBold(True)
+            font.setPointSize(11)
+            painter.setFont(font)
+            painter.setPen(QColor(0, 0, 0, 230))
+            painter.drawText(shadow_rect, Qt.AlignCenter, axis)
+            painter.setPen(color)
+            painter.drawText(label_rect, Qt.AlignCenter, axis)
 
     @staticmethod
-    def _axis_specs() -> tuple[tuple[str, QPointF, QColor], ...]:
+    def _ring_label_rect(axis: str) -> QRectF:
+        if axis == "X":
+            return QRectF(128, 62, 24, 22)
+        if axis == "Y":
+            return QRectF(36, 122, 24, 22)
+        return QRectF(66, 4, 24, 22)
+
+    def _ring_axis_at(self, position: QPointF) -> str | None:
+        for axis, rect in (
+            ("Z", QRectF(26, 26, 104, 104)),
+            ("X", QRectF(25, 53, 106, 50)),
+            ("Y", QRectF(47, 24, 62, 108)),
+        ):
+            if self._distance_to_ellipse(position, rect) <= 0.22:
+                return axis
+            if self._ring_label_rect(axis).contains(position):
+                return axis
+        return None
+
+    def _axis_specs(self) -> tuple[tuple[str, QPointF, QColor], ...]:
+        if self._axis_directions:
+            center = QPointF(78, 78)
+            length = 58.0
+            colors = {
+                "X": QColor(226, 74, 64),
+                "Y": QColor(74, 196, 94),
+                "Z": QColor(60, 145, 245),
+            }
+            specs = []
+            for axis in ("X", "Y", "Z"):
+                direction = self._axis_directions.get(axis)
+                if direction is None:
+                    continue
+                specs.append(
+                    (
+                        axis,
+                        QPointF(
+                            center.x() + direction.x() * length,
+                            center.y() + direction.y() * length,
+                        ),
+                        colors[axis],
+                    )
+                )
+            if specs:
+                return tuple(specs)
         return (
             ("X", QPointF(136, 78), QColor(226, 74, 64)),
             ("Y", QPointF(41, 123), QColor(74, 196, 94)),
@@ -354,6 +544,17 @@ class MoveManipulatorOverlay(QWidget):
         t = max(0.0, min(1.0, t))
         closest = QPointF(start.x() + t * dx, start.y() + t * dy)
         return math.hypot(point.x() - closest.x(), point.y() - closest.y())
+
+    @staticmethod
+    def _distance_to_ellipse(point: QPointF, rect: QRectF) -> float:
+        rx = rect.width() / 2.0
+        ry = rect.height() / 2.0
+        if rx <= 1e-7 or ry <= 1e-7:
+            return 999.0
+        cx = rect.center().x()
+        cy = rect.center().y()
+        value = math.sqrt(((point.x() - cx) / rx) ** 2 + ((point.y() - cy) / ry) ** 2)
+        return abs(value - 1.0)
 
 
 class SelectionBoxOverlay(QWidget):

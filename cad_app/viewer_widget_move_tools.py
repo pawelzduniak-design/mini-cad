@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+import math
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 
 from cad_app.commands import (
     CommandError,
@@ -60,6 +61,13 @@ class ViewerWidgetMoveToolsMixin:
             return
         self._begin_edge_parameter_tool("fillet", item_id, edge_index)
 
+    def _begin_fillet_chamfer_tool(self) -> None:
+        item_id, edge_index = self._selected_edge()
+        if item_id is None or edge_index is None:
+            self._show_status("Select an edge first")
+            return
+        self._begin_edge_parameter_tool("fillet_chamfer", item_id, edge_index)
+
     def _begin_chamfer_tool(self) -> None:
         item_id, edge_index = self._selected_edge()
         if item_id is None or edge_index is None:
@@ -91,10 +99,13 @@ class ViewerWidgetMoveToolsMixin:
             self.width() // 2,
             self.height() // 2,
         )
-        action_name = "Fillet" if tool == "fillet" else "Chamfer"
-        self._set_context_hint(
-            f"{action_name }: drag to set value, Enter apply, Esc cancel"
-        )
+        if tool == "fillet_chamfer":
+            action_name = "Fillet/Chamfer"
+            hint = "drag positive for fillet or negative for chamfer"
+        else:
+            action_name = "Fillet" if tool == "fillet" else "Chamfer"
+            hint = "drag to set value"
+        self._set_context_hint(f"{action_name }: {hint}, Enter apply, Esc cancel")
         self._show_status(f"{action_name }: drag value")
         self._refresh_hud()
         self._refresh_action_state()
@@ -120,6 +131,17 @@ class ViewerWidgetMoveToolsMixin:
             "View",
             (0.0, 0.0, 0.0),
         )
+
+    def _begin_unified_move_tool(self) -> None:
+        selection = self._scene.selection()
+        selected_sketch_items = self._selected_sketch_object_item_ids()
+        if selected_sketch_items:
+            self._begin_sketch_move_tool()
+            return
+        if selection is not None and selection.kind != SelectionKind.OBJECT:
+            self._begin_selected_move_tool()
+            return
+        self._begin_object_move_tool()
 
     def _begin_object_move_tool_on_axis(
         self,
@@ -167,21 +189,12 @@ class ViewerWidgetMoveToolsMixin:
             item_ids=selected_body_item_ids,
         )
         self._viewer.clear_preview_marker()
-        body_label = "bodies" if len(selected_body_item_ids) > 1 else "body"
         if axis_name == "View":
-            self._set_context_hint(
-                f"Move {body_label}: drag in view, Enter apply, Esc cancel"
-            )
-            self._show_status(
-                f"Move {body_label}: drag in view, Enter apply, Esc cancel"
-            )
+            self._set_context_hint("Move: drag in view, Enter apply, Esc cancel")
+            self._show_status("Move: drag in view, Enter apply, Esc cancel")
         else:
-            self._set_context_hint(
-                f"Move {body_label} {axis_name }: drag, Enter apply, Esc cancel"
-            )
-            self._show_status(
-                f"Move {body_label} {axis_name }: drag, Enter apply, Esc cancel"
-            )
+            self._set_context_hint(f"Move {axis_name }: drag, Enter apply, Esc cancel")
+            self._show_status(f"Move {axis_name }: drag, Enter apply, Esc cancel")
         self._refresh_hud()
         self._refresh_action_state()
         LOGGER.info(
@@ -190,8 +203,56 @@ class ViewerWidgetMoveToolsMixin:
             axis_name,
         )
 
+    def _rotate_pivot_from_selection(
+        self,
+    ) -> tuple[float, float, float] | None:
+        """Return a custom pivot point when the selection mixes a body
+        with a subshape (vertex / edge / face).
+
+        Convention: if exactly one body and exactly one subshape are
+        selected, the subshape's centre becomes the rotation pivot.
+        Anything else (single body, multiple subshapes) falls back to
+        the body's bounding-box centre at apply time.
+        """
+        refs = self._scene.selection_refs()
+        body_refs = [
+            r
+            for r in refs
+            if r.kind == SelectionKind.OBJECT
+            and r.item_id in self._scene
+            and not is_sketch_object(self._scene.get(r.item_id).meta)
+        ]
+        pivot_refs = [
+            r
+            for r in refs
+            if r.kind
+            in {
+                SelectionKind.VERTEX,
+                SelectionKind.EDGE,
+                SelectionKind.FACE,
+            }
+        ]
+        if len(body_refs) != 1 or len(pivot_refs) != 1:
+            return None
+        ref = pivot_refs[0]
+        if ref.kind == SelectionKind.FACE:
+            return self._face_center(ref.item_id, ref.index)
+        try:
+            shape = self._picker.subshape(ref.item_id, ref.kind, ref.index)
+        except (CommandError, IndexError, RuntimeError, ValueError):
+            return None
+        return self._shape_center(shape)
+
     def _begin_object_rotate_tool(self) -> None:
-        self._begin_object_rotate_tool_on_axis(self._move_axis_name, self._move_axis)
+        axis_name = (
+            self._move_axis_name
+            if self._move_axis_name in MOVE_MANIPULATOR_AXES
+            else "Z"
+        )
+        self._begin_object_rotate_tool_on_axis(
+            axis_name,
+            MOVE_MANIPULATOR_AXES[axis_name],
+        )
 
     def _begin_object_rotate_tool_on_axis(
         self,
@@ -200,13 +261,30 @@ class ViewerWidgetMoveToolsMixin:
     ) -> None:
         if self._block_modeling_command_during_sketch("Rotate"):
             return
-        selection = self._scene.selection()
-        if selection is not None and selection.kind != SelectionKind.OBJECT:
-            self._show_status("Select a body to rotate")
-            return
-        item_id = (
-            selection.item_id if selection is not None else self._scene.active_item_id()
-        )
+        # Allow either: a single body selection (rotate around body
+        # centroid) or a body + one subshape (rotate around the subshape).
+        pivot_override = self._rotate_pivot_from_selection()
+        refs = self._scene.selection_refs()
+        body_refs = [
+            r
+            for r in refs
+            if r.kind == SelectionKind.OBJECT
+            and r.item_id in self._scene
+            and not is_sketch_object(self._scene.get(r.item_id).meta)
+        ]
+        if body_refs:
+            item_id = body_refs[0].item_id
+        else:
+            selection = self._scene.selection()
+            if selection is not None and selection.kind != SelectionKind.OBJECT:
+                # A non-object single selection is not enough on its own.
+                self._show_status("Select a body to rotate")
+                return
+            item_id = (
+                selection.item_id
+                if selection is not None
+                else self._scene.active_item_id()
+            )
         if item_id is None:
             self._show_status("Select a body first")
             return
@@ -222,6 +300,7 @@ class ViewerWidgetMoveToolsMixin:
             index=None,
             axis_name=axis_name,
             axis=axis,
+            axis_point=pivot_override,
         )
         self._move_axis_name = axis_name
         self._move_axis = axis
@@ -234,9 +313,9 @@ class ViewerWidgetMoveToolsMixin:
             self.height() // 2,
         )
         self._set_context_hint(
-            "Rotate: drag to set angle, X/Y/Z changes axis, Enter apply, Esc cancel"
+            "Rotate: drag a colored ring or type angle, Enter apply, Esc cancel"
         )
-        self._show_status(f"Rotate body {axis_name }: drag angle")
+        self._show_status(f"Rotate body {axis_name }: drag ring")
         self._refresh_hud()
         self._refresh_action_state()
         LOGGER.info(
@@ -246,10 +325,31 @@ class ViewerWidgetMoveToolsMixin:
         )
 
     def _begin_selected_move_tool(self) -> None:
-        self._begin_selected_move_tool_on_axis(
-            "View",
-            (0.0, 0.0, 0.0),
-        )
+        selection = self._scene.selection()
+        if selection is not None and selection.kind in {
+            SelectionKind.FACE,
+            SelectionKind.EDGE,
+            SelectionKind.VERTEX,
+        }:
+            if (
+                selection.kind == SelectionKind.FACE
+                and not self._selection_supports_view_move(selection)
+                and self._selection_supports_face_normal_move(selection)
+            ):
+                self._begin_selected_move_normal_tool()
+                if self._move_session is not None:
+                    self._set_context_hint(
+                        "Move Face Normal: this face supports normal-only move; "
+                        "drag arrow or type distance"
+                    )
+                    self._show_status("Move Face Normal: drag arrow")
+                return
+            self._begin_selected_move_tool_on_axis(
+                "X",
+                MOVE_MANIPULATOR_AXES["X"],
+            )
+            return
+        self._begin_selected_move_tool_on_axis("View", (0.0, 0.0, 0.0))
 
     def _begin_sketch_move_tool(self) -> None:
         self._begin_sketch_move_tool_on_axis(
@@ -264,7 +364,7 @@ class ViewerWidgetMoveToolsMixin:
     ) -> None:
         if self._sketch_session is not None:
             self._show_status("Finish sketch before moving sketch geometry")
-            self._set_context_hint("Finish the active sketch before Move Sketch")
+            self._set_context_hint("Finish the active sketch before Move")
             return
         item_ids = self._selected_sketch_object_item_ids()
         if not item_ids:
@@ -285,13 +385,11 @@ class ViewerWidgetMoveToolsMixin:
             self._orientation_gizmo_overlay.set_axis_name(axis_name)
         self._viewer.clear_preview_marker()
         if axis_name == "View":
-            self._set_context_hint("Move Sketch: drag in view, Enter apply, Esc cancel")
-            self._show_status("Move Sketch: drag in view")
+            self._set_context_hint("Move: drag in view, Enter apply, Esc cancel")
+            self._show_status("Move: drag in view")
         else:
-            self._set_context_hint(
-                f"Move Sketch {axis_name}: drag, Enter apply, Esc cancel"
-            )
-            self._show_status(f"Move Sketch {axis_name}: drag")
+            self._set_context_hint(f"Move {axis_name}: drag, Enter apply, Esc cancel")
+            self._show_status(f"Move {axis_name}: drag")
         self._show_dimension_overlay(
             self._move_overlay_label(self._move_session),
             self.width() // 2,
@@ -341,7 +439,12 @@ class ViewerWidgetMoveToolsMixin:
             axis_name=axis_name,
             axis=axis,
         )
+        self._move_axis_name = axis_name
+        self._move_axis = axis
+        if hasattr(self, "_orientation_gizmo_overlay"):
+            self._orientation_gizmo_overlay.set_axis_name(axis_name)
         self._viewer.clear_preview_marker()
+        self._refresh_native_viewport_for_tool_start()
         if axis_name == "View":
             self._set_context_hint(
                 f"Move {selection .kind .value }: drag in view, "
@@ -398,6 +501,24 @@ class ViewerWidgetMoveToolsMixin:
             return False
         return False
 
+    def _selection_supports_face_normal_move(
+        self,
+        selection: SelectionRef | None,
+    ) -> bool:
+        if selection is None or selection.kind != SelectionKind.FACE:
+            return False
+        if selection.item_id not in self._scene:
+            return False
+        if is_sketch_profile(self._scene.get(selection.item_id).meta):
+            return False
+        try:
+            self._face_normal(selection.item_id, selection.index)
+        except (CommandError, IndexError, TypeError, AttributeError, ValueError):
+            return False
+        except ModuleNotFoundError:
+            return False
+        return True
+
     def _begin_selected_move_normal_tool(self) -> None:
         selection = self._scene.selection()
         if selection is None or selection.kind != SelectionKind.FACE:
@@ -421,10 +542,7 @@ class ViewerWidgetMoveToolsMixin:
     def _begin_context_move_tool(self) -> None:
         selection = self._scene.selection()
         if selection is not None and selection.kind != SelectionKind.OBJECT:
-            self._begin_selected_move_tool_on_axis(
-                "View",
-                (0.0, 0.0, 0.0),
-            )
+            self._begin_selected_move_tool()
             return
         self._begin_object_move_tool_on_axis(
             "View",
@@ -441,7 +559,7 @@ class ViewerWidgetMoveToolsMixin:
         axis = MOVE_MANIPULATOR_AXES.get(axis_name)
         if axis is None or self._move_session is None:
             return
-        if self._move_session.tool not in {"move", "sketch_move"}:
+        if self._move_session.tool not in {"move", "sketch_move", "rotate"}:
             return
         self._move_session.axis_name = axis_name
         self._move_session.axis = axis
@@ -450,8 +568,62 @@ class ViewerWidgetMoveToolsMixin:
         self._move_axis = axis
         if hasattr(self, "_orientation_gizmo_overlay"):
             self._orientation_gizmo_overlay.set_axis_name(axis_name)
-        self._show_status(f"Move axis: {axis_name}")
+        if self._move_session.tool == "rotate":
+            self._update_move_preview()
+        if self._move_session.tool == "rotate":
+            self._set_context_hint(
+                f"Rotate {axis_name}: drag ring or type angle, Enter apply, Esc cancel"
+            )
+            self._show_status(f"Rotate axis: {axis_name}")
+        elif self._move_session.target_kind in {
+            SelectionKind.FACE,
+            SelectionKind.EDGE,
+            SelectionKind.VERTEX,
+        }:
+            target_name = self._move_session.target_kind.value.title()
+            self._set_context_hint(
+                f"Move {target_name} {axis_name}: drag arrow, "
+                "Enter apply, Esc cancel"
+            )
+            self._show_status(f"Move {target_name} {axis_name}: drag arrow")
+        else:
+            self._show_status(f"Move axis: {axis_name}")
+        self._show_dimension_overlay(
+            self._move_overlay_label(self._move_session),
+            self.width() // 2,
+            self.height() // 2,
+        )
+        self._refresh_hud()
         LOGGER.info("Move manipulator axis set to %s", axis_name)
+
+    def _set_topology_move_view_fallback(self) -> None:
+        session = self._move_session
+        if session is None or session.tool != "move":
+            return
+        if session.target_kind not in {
+            SelectionKind.FACE,
+            SelectionKind.EDGE,
+            SelectionKind.VERTEX,
+        }:
+            return
+        if session.axis_name == "View":
+            return
+        selection = SelectionRef(session.item_id, session.target_kind, session.index)
+        if not self._selection_supports_view_move(selection):
+            return
+        session.axis_name = "View"
+        session.axis = (0.0, 0.0, 0.0)
+        session.vector = None
+        target_name = session.target_kind.value.title()
+        self._set_context_hint(
+            f"Move {target_name}: drag in view, Enter apply, Esc cancel"
+        )
+        self._show_status(f"Move {target_name}: drag in view")
+
+    def _refresh_native_viewport_for_tool_start(self) -> None:
+        if not self._viewer.is_initialized:
+            return
+        self._viewer.refresh_native_window()
 
     def _refresh_move_manipulator(self) -> None:
         if not hasattr(self, "_move_manipulator_overlay"):
@@ -459,20 +631,47 @@ class ViewerWidgetMoveToolsMixin:
         if not self._move_manipulator_active():
             self._move_manipulator_overlay.hide()
             return
+        self._move_manipulator_overlay.set_mode(
+            "rotate" if self._move_session.tool == "rotate" else "move"
+        )
+        if self._move_session.tool == "rotate":
+            self._move_manipulator_overlay.set_axis_directions(None)
+        else:
+            self._move_manipulator_overlay.set_axis_directions(
+                self._move_manipulator_axis_directions()
+            )
         self._position_move_manipulator_overlay()
         self._move_manipulator_overlay.show()
         self._move_manipulator_overlay.raise_()
 
     def _move_manipulator_active(self) -> bool:
-        return bool(
-            self._move_session is not None
-            and self._move_session.tool in {"move", "sketch_move"}
-        )
+        session = self._move_session
+        if session is None or session.tool not in {"move", "sketch_move", "rotate"}:
+            return False
+        # Defensive: after Undo/Redo or external scene mutations the target
+        # body may be gone while the session still lingers. Hide the
+        # manipulator rather than projecting arrows onto an anchor that
+        # no longer corresponds to anything in the scene.
+        if session.item_id not in self._scene:
+            return False
+        if session.item_ids and any(
+            item_id not in self._scene for item_id in session.item_ids
+        ):
+            return False
+        return True
 
     def _position_move_manipulator_overlay(self) -> None:
         if not hasattr(self, "_move_manipulator_overlay"):
             return
         overlay = self._move_manipulator_overlay
+        # Hide the manipulator when no move/extrude/fillet session owns it.
+        # Qt.Tool top-level windows can re-appear after resize/activation
+        # events because their visibility is decoupled from the parent
+        # widget; an explicit hide here keeps the startup viewport clean.
+        if not self._move_manipulator_active():
+            if not overlay.isHidden():
+                overlay.hide()
+            return
         size = overlay.width()
         x = (self.width() - size) // 2
         y = (self.height() - size) // 2
@@ -489,7 +688,39 @@ class ViewerWidgetMoveToolsMixin:
         margin = 6
         max_x = max(margin, self.width() - size - margin)
         max_y = max(margin, self.height() - size - margin)
-        overlay.move(min(max(x, margin), max_x), min(max(y, margin), max_y))
+        next_x = min(max(x, margin), max_x)
+        next_y = min(max(y, margin), max_y)
+        if overlay.isWindow():
+            overlay.move(self.mapToGlobal(QPoint(next_x, next_y)))
+        else:
+            overlay.move(next_x, next_y)
+
+    def _move_manipulator_axis_directions(
+        self,
+    ) -> dict[str, tuple[float, float]] | None:
+        if self._move_session is None or not self._viewer.is_initialized:
+            return None
+        try:
+            anchor = self._move_anchor_point(self._move_session) or (0.0, 0.0, 0.0)
+            start_x, start_y = self._viewer.view.Convert(*anchor)
+            directions: dict[str, tuple[float, float]] = {}
+            for axis_name, axis in MOVE_MANIPULATOR_AXES.items():
+                endpoint = (
+                    anchor[0] + axis[0] * 50.0,
+                    anchor[1] + axis[1] * 50.0,
+                    anchor[2] + axis[2] * 50.0,
+                )
+                end_x, end_y = self._viewer.view.Convert(*endpoint)
+                dx = float(end_x - start_x)
+                dy = float(end_y - start_y)
+                length = math.hypot(dx, dy)
+                if length < 1.0:
+                    continue
+                directions[axis_name] = (dx / length, dy / length)
+        except (CommandError, IndexError, RuntimeError, ValueError):
+            LOGGER.debug("Move manipulator axis projection fallback", exc_info=True)
+            return None
+        return directions or None
 
     def _begin_extrude_tool(self, sketch_operation: str = "auto") -> None:
         if self._sketch_session is not None:
@@ -517,9 +748,9 @@ class ViewerWidgetMoveToolsMixin:
                 self._show_status("New bodies: drag arrow, Enter apply, Esc cancel")
             else:
                 self._set_context_hint(
-                    "Push/Pull selected profiles, Enter accept, Esc cancel"
+                    "Extrude selected profiles, Enter accept, Esc cancel"
                 )
-                self._show_status("Sketch profiles Push/Pull: drag arrow")
+                self._show_status("Sketch profiles Extrude: drag arrow")
             self._show_dimension_overlay(
                 self._move_overlay_label(self._move_session),
                 self.width() // 2,
@@ -564,14 +795,14 @@ class ViewerWidgetMoveToolsMixin:
             self._show_status("Cut: drag depth, Enter apply, Esc cancel")
         elif is_profile:
             self._set_context_hint(
-                "Push/Pull: drag height, use Cut into host when needed, Enter apply"
+                "Extrude: drag height, use Cut into host when needed, Enter apply"
             )
-            self._show_status("Push/Pull: drag height, Enter apply, Esc cancel")
+            self._show_status("Extrude: drag height, Enter apply, Esc cancel")
         else:
             self._set_context_hint(
-                "Push/Pull face: drag inward or outward, Enter accept, Esc cancel"
+                "Extrude face: drag inward or outward, Enter accept, Esc cancel"
             )
-            self._show_status("Push/Pull: drag arrow, Enter apply, Esc cancel")
+            self._show_status("Extrude: drag arrow, Enter apply, Esc cancel")
         self._show_dimension_overlay(
             self._move_overlay_label(self._move_session),
             self.width() // 2,
@@ -753,6 +984,12 @@ class ViewerWidgetMoveToolsMixin:
         self._move_axis = axis
         if hasattr(self, "_orientation_gizmo_overlay"):
             self._orientation_gizmo_overlay.set_axis_name(name)
+        if self._move_session is not None and self._move_session.tool in {
+            "move",
+            "sketch_move",
+        }:
+            self._set_move_axis_from_manipulator(name)
+            return
         if self._move_session is not None and self._move_session.tool in {
             "rotate",
             "sketch_revolve",

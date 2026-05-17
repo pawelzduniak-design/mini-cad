@@ -43,6 +43,7 @@ class ViewerWidgetMovePreviewMixin:
             "sketch_extrude",
             "fillet",
             "chamfer",
+            "fillet_chamfer",
             "rotate",
             "sketch_revolve",
             "sketch_move",
@@ -72,11 +73,11 @@ class ViewerWidgetMovePreviewMixin:
     @staticmethod
     def _move_overlay_label(session: MoveSession) -> str:
         if session.tool == "sketch_extrude" and session.operation == "cut":
-            return f"Push/Pull Cut {abs(session .distance) :.2f} mm"
+            return f"Extrude Cut {abs(session .distance) :.2f} mm"
         if session.tool == "sketch_extrude" and session.operation == "new_body":
             return f"New Body {session .distance :.2f} mm"
         if session.tool in {"extrude", "sketch_extrude"}:
-            return f"Push/Pull {session .distance :.2f} mm"
+            return f"Extrude {session .distance :.2f} mm"
         if session.tool == "rotate":
             return f"Rotate {session .axis_name }: {session .distance :.2f} deg"
         if session.tool == "sketch_revolve":
@@ -90,6 +91,10 @@ class ViewerWidgetMovePreviewMixin:
             return f"Fillet R {session .distance :.2f} mm"
         if session.tool == "chamfer":
             return f"Chamfer {session .distance :.2f} mm"
+        if session.tool == "fillet_chamfer":
+            if session.distance >= 0.0:
+                return f"Fillet R {session .distance :.2f} mm"
+            return f"Chamfer {abs(session .distance) :.2f} mm"
         if session.axis_name == "View":
             return f"Move {session .distance :.2f} mm"
         if session.axis_name in {"X", "Y", "Z"}:
@@ -171,6 +176,18 @@ class ViewerWidgetMovePreviewMixin:
                 self._scene.get(session.item_id).shape,
                 session.index,
                 session.distance,
+            )
+        if session.tool == "fillet_chamfer":
+            if session.distance >= 0.0:
+                return fillet_edge(
+                    self._scene.get(session.item_id).shape,
+                    session.index,
+                    session.distance,
+                )
+            return chamfer_edge(
+                self._scene.get(session.item_id).shape,
+                session.index,
+                abs(session.distance),
             )
         if session.target_kind == SelectionKind.EDGE:
             dx, dy, dz = self._edge_move_vector(session)
