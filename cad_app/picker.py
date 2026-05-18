@@ -331,15 +331,24 @@ class Picker:
 
     @staticmethod
     def _face_pick_tier(aggregate: _FacePickAggregate) -> int:
-        # Tier 0: planar face within the planar-preference radius - wins
-        #         over curved-face centre hits so the top/bottom of a
-        #         cylinder is preferred over its cylindrical side when
-        #         the cursor is near the boundary.
+        # Tier 0: planar face the centre ray MISSED but a near offset
+        #         (within the planar-preference radius) landed on.
+        #         This bridges the gap when the visible top of a
+        #         cylinder is a thin ellipse at oblique angles - clicks
+        #         1-3 px below the silhouette would otherwise pick the
+        #         curved side, but the offset rays still reach the top.
         # Tier 1: anything the centre ray hit. Standard "what's under
-        #         the cursor wins" behaviour.
+        #         the cursor wins"; depth tie-break keeps the closest
+        #         face (e.g. clicking the side of a cylinder selects
+        #         the side, NOT the bottom that the ray happens to
+        #         exit through).
         # Tier 2: everything else - only offset rays touched the face,
         #         and it isn't a planar-preference candidate.
-        if aggregate.is_planar and aggregate.min_distance_px <= _PLANAR_PREFERENCE_PX:
+        if (
+            aggregate.is_planar
+            and not aggregate.center_hit
+            and aggregate.min_distance_px <= _PLANAR_PREFERENCE_PX
+        ):
             return 0
         if aggregate.center_hit:
             return 1
