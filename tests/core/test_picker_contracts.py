@@ -727,3 +727,59 @@ def test_pick_face_is_stable_pixel_by_pixel_across_top_silhouette() -> None:
         "TOP picks must come before LATERAL picks as the cursor moves "
         f"down past the silhouette. sequence={indices}."
     )
+
+
+def test_pick_face_top_view_with_eye_inside_body_still_picks_top() -> None:
+    """Top view + FitAll often leaves OCCT's Eye() right next to or
+    even inside the body's z-range. With euclidean dist(eye, hit) the
+    bottom cap (at z=0, close to a mid-body eye) used to beat the top
+    cap (at z=H, also close but on the opposite side) - so clicking
+    the only visible face returned the hidden one. Depth measured
+    along the view direction must keep the top cap winning regardless
+    of where OCCT parks the eye."""
+    require_ocp()
+
+    from cad_app.picker import Picker
+    from cad_app.scene import Scene
+    from cad_app.sketch import extrude_profile, make_circle_profile
+    from cad_app.workplane import Workplane
+
+    profile = make_circle_profile(Workplane.world_xy(), radius=20.0)
+    shape = extrude_profile(profile, 50.0)
+    scene = Scene()
+    item_id = scene.add_shape(shape, meta={"kind": "body", "source": "sketch_extrude"})
+    picker = Picker(scene)
+    top_index = _find_face_index_with_normal(picker, item_id, (0.0, 0.0, 1.0))
+    bottom_index = _find_face_index_with_normal(picker, item_id, (0.0, 0.0, -1.0))
+
+    class _TopViewEyeInsideBody:
+        """Orthographic top view with Eye() at the body's mid-height.
+
+        This is the configuration OCCT lands in after pressing the
+        'Top' orientation button + FitAll on a tall extruded circle:
+        ConvertWithProj returns dir = (0, 0, -1), but Eye() ends up
+        inside the body, so dist(eye, top) and dist(eye, bottom) flip
+        the wrong way.
+        """
+
+        def __init__(self) -> None:
+            self._eye = (0.0, 0.0, 25.0)
+
+        def ConvertWithProj(self, x: int, y: int):
+            return (float(x), float(y), 25.0, 0.0, 0.0, -1.0)
+
+        def Eye(self):
+            return self._eye
+
+        def Convert(self, world_x: float, world_y: float, world_z: float):
+            return (world_x, world_y)
+
+    view = _TopViewEyeInsideBody()
+    results = picker.pick_face_results_at(view, 0, 0)
+    assert results, "Top view click on the cylinder must hit at least one face"
+    assert results[0].selection.index == top_index, (
+        "Top cap is the visible face from a top view. Got "
+        f"index={results[0].selection.index}, expected top={top_index}, "
+        f"bottom={bottom_index}. Eye() inside the body must not flip "
+        "the visibility ordering."
+    )

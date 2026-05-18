@@ -851,7 +851,42 @@ class Picker:
         )
 
     @staticmethod
+    def _view_eye_and_direction(
+        view: V3d_View,
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+        """Return ``(eye, view_direction)`` for depth-along-ray ranking.
+
+        The direction is sampled from ``ConvertWithProj(0, 0)`` because
+        every view (real OCP and the test stubs) exposes it, while
+        ``View.Proj()`` is not available on stubs. For orthographic
+        views the direction is constant across the viewport; for
+        perspective views it is the central ray, which is a good enough
+        reference for ranking edges and vertices by visibility.
+        """
+        eye = tuple(float(value) for value in view.Eye())
+        _ox, _oy, _oz, dx, dy, dz = view.ConvertWithProj(0, 0)
+        length = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if length == 0:
+            direction = (0.0, 0.0, -1.0)
+        else:
+            direction = (float(dx / length), float(dy / length), float(dz / length))
+        return eye, direction
+
+    @staticmethod
+    def _depth_along_view(
+        eye: tuple[float, float, float],
+        direction: tuple[float, float, float],
+        point: tuple[float, float, float],
+    ) -> float:
+        return (
+            (point[0] - eye[0]) * direction[0]
+            + (point[1] - eye[1]) * direction[1]
+            + (point[2] - eye[2]) * direction[2]
+        )
+
+    @classmethod
     def _shape_screen_points(
+        cls,
         view: V3d_View,
         shape: TopoDS_Shape,
     ) -> list[tuple[float, float, float]]:
@@ -867,21 +902,23 @@ class Picker:
         if not all(math.isfinite(float(value)) for value in values):
             return []
 
-        eye = tuple(float(value) for value in view.Eye())
+        eye, direction = cls._view_eye_and_direction(view)
         points: list[tuple[float, float, float]] = []
         for world_x in (min_x, max_x):
             for world_y in (min_y, max_y):
                 for world_z in (min_z, max_z):
                     screen_x, screen_y = view.Convert(world_x, world_y, world_z)
-                    depth = math.dist(
+                    depth = cls._depth_along_view(
                         eye,
+                        direction,
                         (float(world_x), float(world_y), float(world_z)),
                     )
                     points.append((float(screen_x), float(screen_y), depth))
         return points
 
-    @staticmethod
+    @classmethod
     def _vertex_screen_point(
+        cls,
         view: V3d_View,
         vertex_shape: TopoDS_Shape,
     ) -> tuple[float, float, float] | None:
@@ -890,8 +927,8 @@ class Picker:
 
         point = BRep_Tool.Pnt_s(TopoDS.Vertex_s(vertex_shape))
         screen_x, screen_y = view.Convert(point.X(), point.Y(), point.Z())
-        eye = tuple(float(value) for value in view.Eye())
-        depth = math.dist(eye, (point.X(), point.Y(), point.Z()))
+        eye, direction = cls._view_eye_and_direction(view)
+        depth = cls._depth_along_view(eye, direction, (point.X(), point.Y(), point.Z()))
         return (float(screen_x), float(screen_y), depth)
 
     @classmethod
@@ -907,8 +944,9 @@ class Picker:
             return None
         return cls._point_to_polyline_metric((x, y), polyline)
 
-    @staticmethod
+    @classmethod
     def _vertex_screen_metric(
+        cls,
         view: V3d_View,
         vertex_shape: TopoDS_Shape,
         x: float,
@@ -919,8 +957,8 @@ class Picker:
 
         point = BRep_Tool.Pnt_s(TopoDS.Vertex_s(vertex_shape))
         screen_x, screen_y = view.Convert(point.X(), point.Y(), point.Z())
-        eye = view.Eye()
-        depth = math.dist(eye, (point.X(), point.Y(), point.Z()))
+        eye, direction = cls._view_eye_and_direction(view)
+        depth = cls._depth_along_view(eye, direction, (point.X(), point.Y(), point.Z()))
         return math.hypot(float(screen_x) - x, float(screen_y) - y), depth
 
     def _ray_pick_face(
@@ -977,7 +1015,20 @@ class Picker:
                 continue
 
             point = intersector.Pnt(index)
-            depth = math.dist(eye, (point.X(), point.Y(), point.Z()))
+            # Depth along the ray direction, NOT euclidean dist(eye, hit).
+            # In Top/Bottom orthographic views OCCT places Eye() right
+            # next to the model after FitAll - sometimes inside the
+            # body's z-range. dist(eye, hit) then ranks the near cap
+            # behind the camera as closer than the far cap in front,
+            # so clicking the visible top of a cylinder used to select
+            # the bottom. (hit - eye) . view_direction is a signed
+            # depth: smaller (more negative) = closer to camera along
+            # the view, which is what visibility ordering needs.
+            depth = (
+                (point.X() - eye[0]) * direction[0]
+                + (point.Y() - eye[1]) * direction[1]
+                + (point.Z() - eye[2]) * direction[2]
+            )
             face = intersector.Face(index)
             results.append(
                 FacePickResult(
@@ -1080,8 +1131,9 @@ class Picker:
             (0.0, tolerance_px),
         )
 
-    @staticmethod
+    @classmethod
     def _edge_screen_polyline(
+        cls,
         view: V3d_View,
         edge_shape: TopoDS_Shape,
         sample_count: int = 24,
@@ -1099,13 +1151,15 @@ class Picker:
 
         samples = 2 if curve.GetType() == GeomAbs_Line else max(2, sample_count)
         points: list[tuple[float, float, float]] = []
-        eye_x, eye_y, eye_z = view.Eye()
+        eye, direction = cls._view_eye_and_direction(view)
         for offset in range(samples):
             ratio = offset / (samples - 1)
             parameter = first + (last - first) * ratio
             point = curve.Value(parameter)
             screen_x, screen_y = view.Convert(point.X(), point.Y(), point.Z())
-            depth = math.dist((eye_x, eye_y, eye_z), (point.X(), point.Y(), point.Z()))
+            depth = cls._depth_along_view(
+                eye, direction, (point.X(), point.Y(), point.Z())
+            )
             points.append((float(screen_x), float(screen_y), depth))
         return points
 
