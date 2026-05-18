@@ -48,6 +48,38 @@ class _OrthoView:
         return (world_x * self._scale, world_y * self._scale)
 
 
+class _AxoTopFaceRegressionView:
+    """Orthographic axonometric view sampled from the real OCCT viewer.
+
+    The click at screen (0, 0) is on an extruded circle's visible top
+    face. Some 4 px halo rays also touch the far bottom cap, so this
+    view guards the ranking between the real centre hit and halo hits.
+    """
+
+    def __init__(self) -> None:
+        self._origin = (170.174319062, -162.124629621, 201.409654727)
+        inv_sqrt_3 = 1.0 / math.sqrt(3.0)
+        self._direction = (-inv_sqrt_3, inv_sqrt_3, -inv_sqrt_3)
+        self._right_per_px = (0.447204969, 0.447204969, 0.0)
+        self._down_per_px = (0.258193909, -0.258193909, -0.516387818)
+        self._eye = (281.15, -281.15, 302.855)
+
+    def ConvertWithProj(self, x: int, y: int):
+        origin = tuple(
+            self._origin[index]
+            + self._right_per_px[index] * float(x)
+            + self._down_per_px[index] * float(y)
+            for index in range(3)
+        )
+        return (*origin, *self._direction)
+
+    def Eye(self):
+        return self._eye
+
+    def Convert(self, world_x: float, world_y: float, world_z: float):
+        return (0.0, 0.0)
+
+
 def _find_face_index_with_normal(
     picker, item_id: str, expected_normal: tuple[float, float, float]
 ) -> int:
@@ -419,4 +451,108 @@ def test_pick_face_planar_bonus_does_not_apply_beyond_radius(monkeypatch) -> Non
     assert result.selection.index == side_index, (
         "Centre hit on curved face must stay the winner when the only "
         "planar candidate is beyond the planar-preference radius."
+    )
+
+
+def test_pick_face_planar_halo_does_not_beat_closer_curved_halo(
+    monkeypatch,
+) -> None:
+    """Near a cylinder rim, both the curved side and a planar cap can be
+    reached only by halo rays. The cap must not win just because it is
+    planar when the curved side is actually closer to the camera."""
+    require_ocp()
+
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeCylinder
+
+    from cad_app.picker import FacePickResult, Picker
+    from cad_app.scene import Scene
+    from cad_app.types import SelectionKind, SelectionRef
+
+    cylinder = BRepPrimAPI_MakeCylinder(10.0, 30.0).Shape()
+    scene = Scene()
+    item_id = scene.add_shape(cylinder, meta={"kind": "body", "source": "cyl"})
+    picker = Picker(scene)
+
+    bottom_index = _find_face_index_with_normal(picker, item_id, (0.0, 0.0, -1.0))
+    side_index = None
+    for idx in range(1, picker.count_subshapes(item_id, SelectionKind.FACE) + 1):
+        face = picker.subshape(item_id, SelectionKind.FACE, idx)
+        if not Picker._is_planar_face(face):
+            side_index = idx
+            break
+    assert side_index is not None
+
+    side_ref = SelectionRef(item_id, SelectionKind.FACE, side_index)
+    bottom_ref = SelectionRef(item_id, SelectionKind.FACE, bottom_index)
+
+    def fake_ray_pick_faces(
+        _item_id, _shape, _origin, _direction, _eye, distance_px=0.0
+    ):
+        if distance_px <= 0.001:
+            return []
+        if distance_px <= 4.0:
+            return [
+                FacePickResult(
+                    selection=side_ref,
+                    depth=10.0,
+                    distance_px=distance_px,
+                    is_planar=False,
+                ),
+                FacePickResult(
+                    selection=bottom_ref,
+                    depth=15.0,
+                    distance_px=distance_px,
+                    is_planar=True,
+                    is_front_facing=False,
+                ),
+            ]
+        return []
+
+    monkeypatch.setattr(picker, "_ray_pick_faces", fake_ray_pick_faces)
+
+    view = _OrthoView()
+    result = picker.pick_face_result_at(view, 0, 0)
+    assert result is not None
+    assert result.selection.index == side_index, (
+        "A closer curved side halo hit must beat a farther planar cap "
+        "halo hit so the cylinder side remains easy to select."
+    )
+
+
+def test_pick_face_top_center_beats_far_bottom_cap_halo_hit() -> None:
+    """A centre hit on the visible top face must not lose to the far
+    bottom cap just because a 4 px halo ray also intersects that planar
+    face. This reproduces the extruded-circle cylinder selection bug."""
+    require_ocp()
+
+    from cad_app.picker import Picker
+    from cad_app.scene import Scene
+    from cad_app.sketch import extrude_profile, make_circle_profile_at
+    from cad_app.types import SelectionKind
+    from cad_app.workplane import Workplane
+
+    profile = make_circle_profile_at(
+        Workplane.world_xy(),
+        (-7.322, 15.439),
+        30.0,
+    )
+    shape = extrude_profile(profile, 43.43)
+    scene = Scene()
+    item_id = scene.add_shape(shape, meta={"kind": "body", "source": "sketch_extrude"})
+    picker = Picker(scene)
+
+    top_index = _find_face_index_with_normal(picker, item_id, (0.0, 0.0, 1.0))
+    bottom_index = _find_face_index_with_normal(picker, item_id, (0.0, 0.0, -1.0))
+
+    results = picker.pick_face_results_at(_AxoTopFaceRegressionView(), 0, 0)
+    assert results, "Click on the visible top cap should return face candidates"
+    assert results[0].selection.kind == SelectionKind.FACE
+    assert results[0].selection.index == top_index, (
+        "The visible top face hit by the centre ray must beat the far "
+        f"bottom cap. Got index={results[0].selection.index}, "
+        f"expected top={top_index}, bottom={bottom_index}."
+    )
+    assert any(result.selection.index == bottom_index for result in results), (
+        "The bottom cap should still appear as an overlap candidate; it "
+        "just must not outrank the visible top face."
     )

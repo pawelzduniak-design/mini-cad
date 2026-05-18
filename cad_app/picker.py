@@ -33,6 +33,7 @@ class FacePickResult:
     depth: float
     distance_px: float = 0.0
     is_planar: bool = False
+    is_front_facing: bool = True
 
 
 @dataclass(frozen=True)
@@ -71,10 +72,12 @@ class _FacePickAggregate:
     best_result: FacePickResult
     priority: int
     center_hit: bool
+    center_depth: float | None
     vote_count: int
     min_distance_px: float
     min_depth: float
     is_planar: bool
+    is_front_facing: bool
 
 
 # When the halo lands a planar face within this many pixels of the
@@ -290,17 +293,26 @@ class Picker:
                             best_result=result,
                             priority=priority,
                             center_hit=is_center,
+                            center_depth=result.depth if is_center else None,
                             vote_count=1,
                             min_distance_px=result.distance_px,
                             min_depth=result.depth,
                             is_planar=result.is_planar,
+                            is_front_facing=result.is_front_facing,
                         )
                         continue
                     aggregate.vote_count += 1
                     if is_center:
                         aggregate.center_hit = True
+                        aggregate.center_depth = (
+                            result.depth
+                            if aggregate.center_depth is None
+                            else min(aggregate.center_depth, result.depth)
+                        )
                     if priority < aggregate.priority:
                         aggregate.priority = priority
+                    if result.is_front_facing:
+                        aggregate.is_front_facing = True
                     if self._is_better_face_pick(
                         result.distance_px,
                         result.depth,
@@ -313,12 +325,23 @@ class Picker:
                         aggregate.min_distance_px = result.distance_px
                         aggregate.min_depth = result.depth
 
+        closest_center_depth = min(
+            (
+                aggregate.center_depth
+                for aggregate in aggregates.values()
+                if aggregate.center_depth is not None
+            ),
+            default=math.inf,
+        )
         return [
             aggregate.best_result
             for _selection, aggregate in sorted(
                 aggregates.items(),
                 key=lambda kv: (
-                    self._face_pick_tier(kv[1]),
+                    self._face_pick_tier(
+                        kv[1],
+                        closest_center_depth,
+                    ),
                     kv[1].priority,
                     kv[1].min_distance_px,
                     kv[1].min_depth,
@@ -330,13 +353,23 @@ class Picker:
         ]
 
     @staticmethod
-    def _face_pick_tier(aggregate: _FacePickAggregate) -> int:
+    def _face_pick_tier(
+        aggregate: _FacePickAggregate,
+        closest_center_depth: float,
+    ) -> int:
         # Tier 0: planar face the centre ray MISSED but a near offset
         #         (within the planar-preference radius) landed on.
         #         This bridges the gap when the visible top of a
         #         cylinder is a thin ellipse at oblique angles - clicks
         #         1-3 px below the silhouette would otherwise pick the
         #         curved side, but the offset rays still reach the top.
+        #         The candidate must also be at least as close as the
+        #         front centre hit; otherwise the same rule can promote
+        #         the back/bottom cap reached by a halo ray over the
+        #         actual top face under the cursor.
+        #         It must also face the camera. That preserves the
+        #         "easy top cap" behavior while preventing hidden/back
+        #         caps from stealing clicks near the side wall rim.
         # Tier 1: anything the centre ray hit. Standard "what's under
         #         the cursor wins"; depth tie-break keeps the closest
         #         face (e.g. clicking the side of a cylinder selects
@@ -347,7 +380,9 @@ class Picker:
         if (
             aggregate.is_planar
             and not aggregate.center_hit
+            and aggregate.is_front_facing
             and aggregate.min_distance_px <= _PLANAR_PREFERENCE_PX
+            and aggregate.min_depth <= closest_center_depth + 1e-7
         ):
             return 0
         if aggregate.center_hit:
@@ -948,12 +983,14 @@ class Picker:
 
             point = intersector.Pnt(index)
             depth = math.dist(eye, (point.X(), point.Y(), point.Z()))
+            face = intersector.Face(index)
             results.append(
                 FacePickResult(
                     selection=selection,
                     depth=depth,
                     distance_px=distance_px,
-                    is_planar=self._is_planar_face(intersector.Face(index)),
+                    is_planar=self._is_planar_face(face),
+                    is_front_facing=self._is_front_facing_face(face, direction),
                 )
             )
 
@@ -970,6 +1007,39 @@ class Picker:
         except (RuntimeError, ValueError):
             return False
         return surface.GetType() == GeomAbs_Plane
+
+    @staticmethod
+    def _is_front_facing_face(
+        face_shape: TopoDS_Shape,
+        ray_direction: tuple[float, float, float],
+    ) -> bool:
+        from OCP.BRepAdaptor import BRepAdaptor_Surface
+        from OCP.GeomAbs import GeomAbs_Plane
+        from OCP.TopAbs import TopAbs_REVERSED
+        from OCP.TopoDS import TopoDS
+
+        try:
+            face = TopoDS.Face_s(face_shape)
+            surface = BRepAdaptor_Surface(face)
+        except (RuntimeError, ValueError):
+            return True
+        if surface.GetType() != GeomAbs_Plane:
+            return True
+
+        normal = surface.Plane().Axis().Direction()
+        normal_x = float(normal.X())
+        normal_y = float(normal.Y())
+        normal_z = float(normal.Z())
+        if face.Orientation() == TopAbs_REVERSED:
+            normal_x = -normal_x
+            normal_y = -normal_y
+            normal_z = -normal_z
+        dot = (
+            normal_x * ray_direction[0]
+            + normal_y * ray_direction[1]
+            + normal_z * ray_direction[2]
+        )
+        return dot < 1e-7
 
     @staticmethod
     def _face_pick_priority(meta: dict[str, object]) -> int:
