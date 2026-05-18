@@ -406,35 +406,23 @@ class ViewerWidgetStateMixin(ViewerWidgetStateSnapshotMixin):
         x: int,
         y: int,
     ) -> tuple[str, bool, str] | None:
-        left, top, size = self._orientation_gizmo_rect()
+        # Click → view target ONLY when the Qt overlay's own button
+        # rects or cube polygons identify a real target. The previous
+        # 3x3-grid fallback returned a target for every pixel inside
+        # the 156x156 gizmo rect, which collided with the real OCCT
+        # AIS_ViewCube rendered in the same corner: clicking the
+        # cube's visible Top face landed in an unrelated grid zone
+        # and produced "click Top, see Right" jumps.
+        left, top, _size = self._orientation_gizmo_rect()
         local_x = x - left
         local_y = y - top
         if hasattr(self, "_orientation_gizmo_overlay"):
-            target = self._orientation_gizmo_overlay.view_at(local_x, local_y)
-            if target is not None:
-                return target
-        return self._orientation_gizmo_fallback_view(local_x, local_y, size)
+            return self._orientation_gizmo_overlay.view_at(local_x, local_y)
+        return None
 
     def _orientation_gizmo_axis_at(self, x: int, y: int) -> str | None:
         target = self._orientation_gizmo_view_at(x, y)
         return None if target is None else target[0]
-
-    @staticmethod
-    def _orientation_gizmo_fallback_view(
-        local_x: int,
-        local_y: int,
-        size: int,
-    ) -> tuple[str, bool, str] | None:
-        third = size / 3.0
-        if local_y < third:
-            return ("z", True, "Top")
-        if local_y > size - third:
-            return ("z", False, "Bottom")
-        if local_x < third:
-            return ("x", False, "Left")
-        if local_x > size - third:
-            return ("x", True, "Right")
-        return ("y", False, "Front")
 
     def _orientation_gizmo_rect(self) -> tuple[int, int, int]:
         margin = 18

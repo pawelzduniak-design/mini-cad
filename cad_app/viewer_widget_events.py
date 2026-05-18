@@ -325,6 +325,16 @@ class ViewerWidgetEventMixin:
                 if view_target is not None:
                     axis, positive, label = view_target
                     self._apply_orientation_gizmo_target(axis, positive, label)
+                else:
+                    # No Qt-overlay button matched - hand the click to
+                    # OCCT so its AIS_ViewCube (rendered in the same
+                    # corner) gets the chance to animate to whichever
+                    # of its faces was actually clicked. Without this
+                    # the cube was visually present but inert.
+                    self._forward_click_to_view_cube(
+                        position.x(),
+                        position.y(),
+                    )
             self._orientation_gizmo_press = None
             self._orientation_gizmo_dragging = False
             event.accept()
@@ -1092,6 +1102,30 @@ class ViewerWidgetEventMixin:
         if nz < -0.95:
             return "BOTTOM(-Z)"
         return f"side(normal={nx:+.2f},{ny:+.2f},{nz:+.2f})"
+
+    def _forward_click_to_view_cube(self, x: int, y: int) -> None:
+        """Route a click that landed in the gizmo corner to OCCT so its
+        AIS_ViewCube can run its built-in camera animation. We can't
+        let the click reach normal Qt event handling (that would
+        commit any active Move session) but we still want the cube to
+        respond to clicks on its visible faces; OCCT does that for us
+        when we call ``context.SelectDetected()`` while the cube is
+        under the cursor.
+        """
+        if not self._viewer.is_initialized:
+            return
+        view_x, view_y = self._to_view_pixels(x, y)
+        try:
+            self._viewer.context.MoveTo(
+                int(view_x),
+                int(view_y),
+                self._viewer.view,
+                True,
+            )
+            if self._viewer.context.HasDetectedShape():
+                self._viewer.context.SelectDetected()
+        except Exception:
+            LOGGER.debug("View cube click forwarding failed", exc_info=True)
 
     def _set_rotate_pivot_from_click(self, x: int, y: int) -> bool:
         """Shift+click while in Rotate: re-pick the pivot from whatever
