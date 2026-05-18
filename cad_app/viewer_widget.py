@@ -114,8 +114,17 @@ class ViewerWidget(
         self._active_category = "select"
         self._last_status_text = "Ready"
         self._context_hint_text = ""
+        # OCCT's AIS_ViewCube (configured in viewer.py) is the visible
+        # gizmo - it rotates with the camera and labels every face.
+        # The Qt OrientationGizmoOverlay duplicated that cube in the
+        # same corner with a different colour scheme; turn its drawing
+        # OFF so the user only sees the OCCT cube. We KEEP the click-
+        # routing path active (enabled = True) so the existing
+        # contract - "a click in the gizmo corner during an active
+        # Move session must not commit the move" - keeps holding even
+        # though no Qt pixels are drawn there.
         self._orientation_gizmo_enabled = True
-        self._orientation_gizmo_overlay_visible = True
+        self._orientation_gizmo_overlay_visible = False
         self._orientation_gizmo_press: tuple[int, int] | None = None
         self._orientation_gizmo_dragging = False
         self._dimension_overlay = QLabel(self)
