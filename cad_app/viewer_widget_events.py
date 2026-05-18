@@ -629,10 +629,16 @@ class ViewerWidgetEventMixin:
             self._refresh_hud()
             if pick_result is not None:
                 LOGGER.info(
-                    "Selected face item_id=%s index=%d depth=%.2f",
+                    "Selected face item_id=%s index=%d %s depth=%.2f "
+                    "logical=(%s,%s) view=(%s,%s)",
                     selection.item_id,
                     selection.index,
+                    self._face_orientation_label(selection.item_id, selection.index),
                     pick_result.depth,
+                    x,
+                    y,
+                    view_x,
+                    view_y,
                 )
             return
         if selection.kind == SelectionKind.OBJECT:
@@ -1063,6 +1069,29 @@ class ViewerWidgetEventMixin:
     def _to_view_pixels(self, x: int, y: int) -> tuple[int, int]:
         scale = self.devicePixelRatioF()
         return int(round(x * scale)), int(round(y * scale))
+
+    def _face_orientation_label(self, item_id: str, face_index: int) -> str:
+        """Return a short tag like 'TOP', 'BOTTOM', or 'side' for the log.
+
+        The numeric face index alone doesn't tell us at a glance which
+        physical surface was selected - clicking a cylinder top vs its
+        bottom or its lateral wall produces a different index per body.
+        Tagging the log with a direction makes "click visible top, get
+        bottom" reports diagnosable without re-deriving the topology.
+        """
+        try:
+            from cad_app.commands import face_normal_vector
+
+            shape = self._scene.get(item_id).shape
+            normal = face_normal_vector(shape, face_index)
+        except Exception:
+            return "(orientation n/a)"
+        nx, ny, nz = float(normal[0]), float(normal[1]), float(normal[2])
+        if nz > 0.95:
+            return "TOP(+Z)"
+        if nz < -0.95:
+            return "BOTTOM(-Z)"
+        return f"side(normal={nx:+.2f},{ny:+.2f},{nz:+.2f})"
 
     def _set_rotate_pivot_from_click(self, x: int, y: int) -> bool:
         """Shift+click while in Rotate: re-pick the pivot from whatever
