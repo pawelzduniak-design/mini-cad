@@ -453,14 +453,6 @@ class Viewer(ViewerMarkerMixin):
         )
         from OCP.Quantity import Quantity_Color, Quantity_TOC_RGB
         from OCP.TCollection import TCollection_AsciiString
-        from OCP.V3d import (
-            V3d_TypeOfOrientation_Zup_Back,
-            V3d_TypeOfOrientation_Zup_Bottom,
-            V3d_TypeOfOrientation_Zup_Front,
-            V3d_TypeOfOrientation_Zup_Left,
-            V3d_TypeOfOrientation_Zup_Right,
-            V3d_TypeOfOrientation_Zup_Top,
-        )
 
         if hasattr(self.view, "TriedronErase"):
             self.view.TriedronErase()
@@ -469,6 +461,14 @@ class Viewer(ViewerMarkerMixin):
 
         view_cube = AIS_ViewCube()
         view_cube.SetSize(70.0)
+        # SetYup MUST come before any label/style mutation: it calls
+        # ResetStyles() under the hood, which clears whatever labels
+        # and aspects had been set against the Y-up defaults. Doing
+        # SetYup first and only THEN customising labels and colours
+        # keeps the bindings aligned with the cube's Z-up face
+        # orientations - otherwise the labels survive on the wrong
+        # geometric face and clicking 'Back' jumps to Right, 'Right'
+        # to Bottom, and so on.
         view_cube.SetYup(False, True)
         view_cube.SetDrawAxes(True)
         view_cube.SetDrawEdges(True)
@@ -483,18 +483,12 @@ class Viewer(ViewerMarkerMixin):
             TCollection_AsciiString("Y"),
             TCollection_AsciiString("Z"),
         )
-        for orientation, label in (
-            (V3d_TypeOfOrientation_Zup_Top, "Top"),
-            (V3d_TypeOfOrientation_Zup_Bottom, "Bottom"),
-            (V3d_TypeOfOrientation_Zup_Left, "Left"),
-            (V3d_TypeOfOrientation_Zup_Right, "Right"),
-            (V3d_TypeOfOrientation_Zup_Front, "Front"),
-            (V3d_TypeOfOrientation_Zup_Back, "Back"),
-        ):
-            view_cube.SetBoxSideLabel(
-                orientation,
-                TCollection_AsciiString(label),
-            )
+        # OCCT's own resetLabels() already binds 'FRONT'/'BACK'/'TOP'/
+        # 'BOTTOM'/'LEFT'/'RIGHT' to the Zup orientations after the
+        # SetYup(False) call above. Use those defaults so the labels
+        # are guaranteed to sit on the geometrically-matching faces
+        # - the previous custom binding loop relabeled the wrong
+        # faces under some OCCT builds.
         view_cube.SetTransformPersistence(
             Graphic3d_TransformPers(
                 Graphic3d_TMF_TriedronPers,
