@@ -258,7 +258,13 @@ def test_native_orientation_gizmo_keeps_coordinate_axes(monkeypatch) -> None:
     assert draw_axes_calls == [True]
 
 
-def test_qt_orientation_gizmo_does_not_paint_view_buttons(qapp, monkeypatch) -> None:
+def test_qt_orientation_gizmo_paints_view_buttons(qapp, monkeypatch) -> None:
+    """The cube renders only its Top/Front/Right faces, so the other
+    three standard views (Bottom, Back, Left) have no visible target
+    unless the shortcut buttons are also painted. The previous design
+    left those buttons clickable but invisible, which is why users
+    reported 'I can't find the Bottom view' after rotating the
+    camera off the default iso."""
     from PySide6.QtGui import QPixmap
 
     from cad_app.viewer_widget_overlays import OrientationGizmoOverlay
@@ -272,7 +278,7 @@ def test_qt_orientation_gizmo_does_not_paint_view_buttons(qapp, monkeypatch) -> 
     pixmap = QPixmap(overlay.size())
     overlay.render(pixmap)
 
-    assert calls == []
+    assert calls == [True], "View shortcut buttons must be painted exactly once"
     assert overlay.view_at(78, 18) == ("z", True, "Top")
 
 

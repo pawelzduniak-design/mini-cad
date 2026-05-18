@@ -61,13 +61,21 @@ class OrientationGizmoOverlay(QWidget):
         painter.setBrush(QColor(63, 69, 78))
         painter.drawPolygon(right)
 
-        label_font = QFont(self.font())
-        label_font.setBold(True)
-        label_font.setPointSize(10)
-        painter.setFont(label_font)
+        cube_label_font = QFont(self.font())
+        cube_label_font.setBold(True)
+        cube_label_font.setPointSize(10)
+        painter.setFont(cube_label_font)
         self._draw_labeled_text(painter, QRectF(64, 43, 42, 18), "Top")
         self._draw_labeled_text(painter, QRectF(48, 74, 34, 18), "Front")
         self._draw_labeled_text(painter, QRectF(86, 74, 40, 18), "Right")
+
+        # Render the six standard-view shortcut buttons around the
+        # cube. Without them the back / bottom / left views were
+        # technically clickable but invisible, since the cube only
+        # ever shows the Top/Front/Right faces of the +X+Y+Z corner.
+        # Drawing the buttons gives the user a visible target for
+        # every standard view.
+        self._draw_view_buttons(painter)
 
         self._draw_axis(
             painter,
@@ -211,13 +219,17 @@ class OrientationGizmoOverlay(QWidget):
 
     @staticmethod
     def _view_button_rects() -> dict[str, QRectF]:
+        # Position around the cube, never on top of it. The cube spans
+        # roughly x:[46,122], y:[34,118]; these buttons live in the
+        # margin so they don't fight with the cube face highlights or
+        # the X/Y/Z axis arrows that radiate from the cube corner.
         return {
-            "Top": QRectF(58, 8, 40, 20),
-            "Back": QRectF(58, 30, 40, 20),
-            "Left": QRectF(8, 68, 40, 22),
-            "Right": QRectF(108, 68, 40, 22),
-            "Front": QRectF(54, 96, 48, 22),
-            "Bottom": QRectF(47, 126, 62, 22),
+            "Top": QRectF(56, 8, 44, 18),
+            "Back": QRectF(8, 8, 40, 18),
+            "Left": QRectF(8, 79, 32, 24),
+            "Right": QRectF(128, 79, 24, 24),
+            "Front": QRectF(108, 8, 40, 18),
+            "Bottom": QRectF(56, 130, 44, 18),
         }
 
     @staticmethod
