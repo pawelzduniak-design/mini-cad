@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt
 
 from cad_app.commands import (
     CommandError,
+    _replace_shape_splitting_disconnected,
     translated_shape,
 )
 from cad_app.feature_history import (
@@ -1174,18 +1175,21 @@ class ViewerWidgetSketchOperationsMixin(
                 profile_face,
                 distance,
             )
+            new_meta = {
+                **append_feature_step(
+                    host_object.meta,
+                    host_object.shape,
+                    step,
+                ),
+                "last_sketch_feature": scene_object.meta.get("profile"),
+            }
             with self._scene.transaction():
-                self._scene.replace_shape(
+                _replace_shape_splitting_disconnected(
+                    self._scene,
                     host_item_id,
                     result,
-                    meta={
-                        **append_feature_step(
-                            host_object.meta,
-                            host_object.shape,
-                            step,
-                        ),
-                        "last_sketch_feature": scene_object.meta.get("profile"),
-                    },
+                    new_meta,
+                    split_source="sketch_feature_split",
                 )
                 self._scene.remove(item_id)
                 self._scene.set_active_item(host_item_id)

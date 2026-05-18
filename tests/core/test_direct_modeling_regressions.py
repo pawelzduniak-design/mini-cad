@@ -307,6 +307,53 @@ def test_extract_disconnected_solids_separates_compound_into_pieces() -> None:
     assert len(single) == 1
 
 
+def test_apply_boolean_bodies_splits_disconnected_result_into_scene_items(
+    monkeypatch,
+) -> None:
+    """A subtract that severs the target into two pieces must spawn
+    extra scene items. The tool body is still removed afterwards."""
+    require_ocp()
+
+    from OCP.BRep import BRep_Builder
+    from OCP.TopoDS import TopoDS_Compound
+
+    from cad_app.commands import apply_boolean_bodies
+    from cad_app.engine import make_box
+    from cad_app.scene import Scene
+
+    target = make_box(40.0, 40.0, 40.0)
+    tool = _translate(make_box(20.0, 20.0, 20.0), 10.0, 10.0, 10.0)
+
+    big = make_box(15.0, 15.0, 15.0)
+    small = _translate(make_box(5.0, 5.0, 5.0), 60.0, 0.0, 0.0)
+    builder = BRep_Builder()
+    compound = TopoDS_Compound()
+    builder.MakeCompound(compound)
+    builder.Add(compound, big)
+    builder.Add(compound, small)
+
+    def fake_boolean(_target, _tool, _op):
+        return compound
+
+    monkeypatch.setattr("cad_app.commands.boolean_bodies", fake_boolean)
+
+    scene = Scene()
+    target_id = scene.add_shape(target, meta={"kind": "body"})
+    tool_id = scene.add_shape(tool, meta={"kind": "body"})
+
+    apply_boolean_bodies(scene, target_id, tool_id, "subtract")
+
+    item_ids = set(item.item_id for item in scene)
+    assert tool_id not in item_ids, "Tool body must be removed after boolean"
+    assert target_id in item_ids, "Target id must persist as the primary piece"
+    assert (
+        len(item_ids) == 2
+    ), f"Expected target + one split-off body, got items={item_ids}"
+    new_id = next(iid for iid in item_ids if iid != target_id)
+    assert scene.get(new_id).meta.get("source") == "boolean_split"
+    assert scene.get(new_id).meta.get("parent_item_id") == target_id
+
+
 def test_apply_extrude_face_splits_disconnected_result_into_scene_items(
     monkeypatch,
 ) -> None:

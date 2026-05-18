@@ -131,6 +131,45 @@ def extrude_face(
     )
 
 
+def _replace_shape_splitting_disconnected(
+    scene: Scene,
+    item_id: str,
+    shape: TopoDS_Shape,
+    meta: dict | None,
+    *,
+    split_source: str,
+) -> TopoDS_Shape:
+    """Replace ``item_id`` with ``shape``; if the shape contains more
+    than one disconnected solid, keep the largest on the original item
+    and add each remaining piece as its own scene body.
+
+    The original item keeps its feature history on the largest piece
+    so re-running the recorded step still produces the same compound
+    on replay (the split is re-applied here). Smaller pieces become
+    new bodies with no history but a ``source`` and ``parent_item_id``
+    tag so the browser can show where they came from.
+    """
+    solids = _extract_disconnected_solids(shape)
+    if len(solids) <= 1:
+        scene.replace_shape(item_id, shape, meta=meta)
+        return shape
+
+    solids_by_size = sorted(solids, key=_solid_volume, reverse=True)
+    primary, extras = solids_by_size[0], solids_by_size[1:]
+    with scene.transaction():
+        scene.replace_shape(item_id, primary, meta=meta)
+        for extra in extras:
+            scene.add_shape(
+                extra,
+                meta={
+                    "kind": "body",
+                    "source": split_source,
+                    "parent_item_id": item_id,
+                },
+            )
+    return primary
+
+
 def apply_extrude_face(
     scene: Scene,
     item_id: str,
@@ -147,29 +186,13 @@ def apply_extrude_face(
     step = capture_extrude_face_step(scene_object.shape, face_index, distance)
     result = extrude_face(scene_object.shape, face_index, distance)
     new_meta = append_feature_step(scene_object.meta, scene_object.shape, step)
-
-    solids = _extract_disconnected_solids(result)
-    if len(solids) <= 1:
-        scene.replace_shape(item_id, result, meta=new_meta)
-        return result
-
-    # The original item keeps its feature history on the largest
-    # piece; smaller pieces become new bodies without history. They
-    # share a source tag so the browser can show their origin.
-    solids_by_size = sorted(solids, key=_solid_volume, reverse=True)
-    primary, extras = solids_by_size[0], solids_by_size[1:]
-    with scene.transaction():
-        scene.replace_shape(item_id, primary, meta=new_meta)
-        for extra in extras:
-            scene.add_shape(
-                extra,
-                meta={
-                    "kind": "body",
-                    "source": "extrude_split",
-                    "parent_item_id": item_id,
-                },
-            )
-    return primary
+    return _replace_shape_splitting_disconnected(
+        scene,
+        item_id,
+        result,
+        new_meta,
+        split_source="extrude_split",
+    )
 
 
 def add_circle_feature(
@@ -660,22 +683,30 @@ def apply_boolean_bodies(
     tool_item_id: str,
     operation: str,
 ) -> TopoDS_Shape:
-    """Apply body-body boolean, replacing target and removing the tool body."""
+    """Apply body-body boolean, replacing target and removing the tool body.
+
+    A subtract or intersect can leave the target as multiple
+    disconnected solids - those become separate scene items so the
+    user can grab each piece on its own.
+    """
     if target_item_id == tool_item_id:
         raise ValueError("Boolean operation requires two different bodies.")
 
     target_object = scene.get(target_item_id)
     tool_object = scene.get(tool_item_id)
     result = boolean_bodies(target_object.shape, tool_object.shape, operation)
+    new_meta = {
+        **target_object.meta,
+        "last_boolean_operation": operation,
+        "last_boolean_tool_item_id": tool_item_id,
+    }
     with scene.transaction():
-        scene.replace_shape(
+        _replace_shape_splitting_disconnected(
+            scene,
             target_item_id,
             result,
-            meta={
-                **target_object.meta,
-                "last_boolean_operation": operation,
-                "last_boolean_tool_item_id": tool_item_id,
-            },
+            new_meta,
+            split_source="boolean_split",
         )
         scene.remove(tool_item_id)
         scene.set_active_item(target_item_id)
