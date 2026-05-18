@@ -63,6 +63,18 @@ class PickCandidate:
     result: object
 
 
+@dataclass
+class _FacePickAggregate:
+    """Per-face accumulation across the 13 halo sample rays."""
+
+    best_result: FacePickResult
+    priority: int
+    center_hit: bool
+    vote_count: int
+    min_distance_px: float
+    min_depth: float
+
+
 class Picker:
     """Maps selected OCP subshapes to stable scene UUID + topology indexes."""
 
@@ -229,8 +241,15 @@ class Picker:
         y: int,
         tolerance_px: float = 8.0,
     ) -> list[FacePickResult]:
-        results_by_selection: dict[SelectionRef, FacePickResult] = {}
-        priorities_by_selection: dict[SelectionRef, int] = {}
+        # Cast 13 sample rays (center + halo) and track per-face stats:
+        # whether the centre ray landed on it, how many rays voted for it,
+        # and the smallest offset / depth observed. The centre-hit flag
+        # and depth keep the contract that the front face under the
+        # cursor wins; vote count is a stable tie-break for genuine
+        # ambiguity (e.g. two faces touching the halo at equal depth),
+        # so a 1-pixel cursor jitter near a face boundary doesn't flip
+        # the choice.
+        aggregates: dict[SelectionRef, _FacePickAggregate] = {}
         for offset_x, offset_y in self._face_pick_offsets(tolerance_px):
             ray = self._view_ray(
                 view,
@@ -241,6 +260,7 @@ class Picker:
                 continue
             origin, direction, eye = ray
             offset_distance = math.hypot(offset_x, offset_y)
+            is_center = offset_distance <= 1e-9
             for scene_object in self._scene:
                 priority = self._face_pick_priority(scene_object.meta)
                 results = self._ray_pick_faces(
@@ -252,33 +272,49 @@ class Picker:
                     offset_distance,
                 )
                 for result in results:
-                    current = results_by_selection.get(result.selection)
-                    current_priority = priorities_by_selection.get(
-                        result.selection,
-                        math.inf,
-                    )
-                    if current is not None and not self._is_better_face_pick(
+                    aggregate = aggregates.get(result.selection)
+                    if aggregate is None:
+                        aggregates[result.selection] = _FacePickAggregate(
+                            best_result=result,
+                            priority=priority,
+                            center_hit=is_center,
+                            vote_count=1,
+                            min_distance_px=result.distance_px,
+                            min_depth=result.depth,
+                        )
+                        continue
+                    aggregate.vote_count += 1
+                    if is_center:
+                        aggregate.center_hit = True
+                    if priority < aggregate.priority:
+                        aggregate.priority = priority
+                    if self._is_better_face_pick(
                         result.distance_px,
                         result.depth,
                         priority,
-                        current.distance_px,
-                        current.depth,
-                        current_priority,
+                        aggregate.min_distance_px,
+                        aggregate.min_depth,
+                        aggregate.priority,
                     ):
-                        continue
-                    results_by_selection[result.selection] = result
-                    priorities_by_selection[result.selection] = priority
+                        aggregate.best_result = result
+                        aggregate.min_distance_px = result.distance_px
+                        aggregate.min_depth = result.depth
 
-        return sorted(
-            results_by_selection.values(),
-            key=lambda result: (
-                result.distance_px,
-                priorities_by_selection[result.selection],
-                result.depth,
-                result.selection.item_id,
-                result.selection.index,
-            ),
-        )
+        return [
+            aggregate.best_result
+            for _selection, aggregate in sorted(
+                aggregates.items(),
+                key=lambda kv: (
+                    0 if kv[1].center_hit else 1,
+                    kv[1].priority,
+                    kv[1].min_distance_px,
+                    kv[1].min_depth,
+                    -kv[1].vote_count,
+                    kv[0].item_id,
+                    kv[0].index,
+                ),
+            )
+        ]
 
     def pick_edge_at(
         self,
