@@ -333,6 +333,50 @@ def test_rounding_and_rotation_keep_geometry_valid() -> None:
     assert bounding_box(rotated)["depth"] == pytest.approx(30.0, abs=1e-3)
 
 
+def test_fillet_and_chamfer_accept_cylinder_cap_circle_edge() -> None:
+    """The top/bottom circles of an extruded circle are the most common
+    edge to round in real CAD work (every shaft end, every hole rim).
+    Previous guard rejected them because one adjacent face was the
+    curved lateral, not planar - which OCCT itself handles fine."""
+    require_ocp()
+
+    from cad_app.command_rounding import edge_supports_direct_round
+    from cad_app.commands import chamfer_edge, fillet_edge
+    from cad_app.picker import Picker
+    from cad_app.sketch import extrude_profile, make_circle_profile
+    from cad_app.types import SelectionKind
+    from cad_app.workplane import Workplane
+
+    profile = make_circle_profile(Workplane.world_xy(), radius=20.0)
+    cylinder = extrude_profile(profile, 50.0)
+
+    face_count_before = count_subshapes(cylinder, "face")
+
+    # Find the two circular cap edges (one adjacent face is the planar
+    # cap, the other is the curved lateral).
+    edge_map = Picker.indexed_map(cylinder, SelectionKind.EDGE)
+    circle_edge_indices: list[int] = []
+    for index in range(1, edge_map.Extent() + 1):
+        if edge_supports_direct_round(cylinder, index):
+            circle_edge_indices.append(index)
+    assert len(circle_edge_indices) == 2, (
+        "An extruded circle has two cap-circle edges; both must support "
+        f"fillet/chamfer. Got supported indices={circle_edge_indices}."
+    )
+
+    top_filleted = fillet_edge(cylinder, circle_edge_indices[0], 2.0)
+    assert_valid_shape(top_filleted)
+    assert (
+        count_subshapes(top_filleted, "face") > face_count_before
+    ), "Fillet on a cap circle must add a torus face."
+
+    top_chamfered = chamfer_edge(cylinder, circle_edge_indices[1], 1.5)
+    assert_valid_shape(top_chamfered)
+    assert (
+        count_subshapes(top_chamfered, "face") > face_count_before
+    ), "Chamfer on a cap circle must add a conical face."
+
+
 def test_sketch_extrude_and_revolve_profiles_are_valid_solids() -> None:
     require_ocp()
 

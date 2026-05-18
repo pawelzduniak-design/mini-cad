@@ -199,15 +199,21 @@ def _assert_sharp_planar_edge(shape: TopoDS_Shape, edge: TopoDS_Edge) -> None:
         raise UnsupportedTopologyError(
             "Edge operation requires exactly two adjacent faces."
         )
-    if not all(_is_planar_face(face) for face in adjacent_faces):
-        raise UnsupportedTopologyError(
-            "Edge operation is allowed only between planar faces."
-        )
 
-    first_normal = _planar_face_normal(adjacent_faces[0])
-    second_normal = _planar_face_normal(adjacent_faces[1])
-    if abs(first_normal.Dot(second_normal)) > 0.999:
-        raise UnsupportedTopologyError("Edge operation requires a sharp planar edge.")
+    # Two planar neighbours: reject co-planar pairs (they don't form a
+    # real edge to round). A cylinder's top/bottom circle is between a
+    # planar cap and a curved lateral - that's a perfectly valid fillet
+    # target, so don't insist BOTH neighbours be planar. OCCT's
+    # BRepFilletAPI handles tangent/smooth edges by reporting
+    # IsDone()=False or NbEdges()=0, which the downstream contour /
+    # validate checks already catch.
+    if all(_is_planar_face(face) for face in adjacent_faces):
+        first_normal = _planar_face_normal(adjacent_faces[0])
+        second_normal = _planar_face_normal(adjacent_faces[1])
+        if abs(first_normal.Dot(second_normal)) > 0.999:
+            raise UnsupportedTopologyError(
+                "Edge operation requires a sharp planar edge."
+            )
 
 
 def _assert_supported_round_contour(
@@ -241,8 +247,14 @@ def _assert_round_surface_count(
 
 
 def _count_cylindrical_faces(shape: TopoDS_Shape) -> int:
+    # Counts faces a fillet can introduce: a fillet between two planar
+    # faces creates a cylindrical strip, but a fillet on a planar/curved
+    # circle edge (e.g. top of a cylinder) creates a TORUS. Both are
+    # "round surfaces" the post-fillet sanity check expects to see grow
+    # by N. Counting any non-planar analytic surface keeps that check
+    # alive without falsely failing the cylinder-cap fillet case.
     from OCP.BRepAdaptor import BRepAdaptor_Surface
-    from OCP.GeomAbs import GeomAbs_Cylinder
+    from OCP.GeomAbs import GeomAbs_Plane
     from OCP.TopoDS import TopoDS
 
     face_map = Picker.indexed_map(shape, SelectionKind.FACE)
@@ -250,7 +262,7 @@ def _count_cylindrical_faces(shape: TopoDS_Shape) -> int:
         1
         for index in range(1, face_map.Extent() + 1)
         if BRepAdaptor_Surface(TopoDS.Face_s(face_map.FindKey(index))).GetType()
-        == GeomAbs_Cylinder
+        != GeomAbs_Plane
     )
 
 
