@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
-  { name = "Pawel Zduniak", email = "pawelzduniak@gmail.com" },
+  { name = "Pawel Zduniak", email = "pawel.zduniak@gmail.com" },
 ]
 dependencies = [
   "PySide6",
