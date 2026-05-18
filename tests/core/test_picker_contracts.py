@@ -556,3 +556,174 @@ def test_pick_face_top_center_beats_far_bottom_cap_halo_hit() -> None:
         "The bottom cap should still appear as an overlap candidate; it "
         "just must not outrank the visible top face."
     )
+
+
+def test_pick_face_planar_bonus_does_not_steal_clicks_across_bodies(
+    monkeypatch,
+) -> None:
+    """Two separate bodies: the centre ray hits body A's curved face,
+    while a halo ray slips past it and reaches body B's planar face.
+    The planar bonus must NOT promote body B's face - it is meant to
+    resolve same-body face ambiguity (cylinder top vs side), not let
+    a planar face on a different body behind the cursor steal the
+    click."""
+    require_ocp()
+
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeCylinder
+
+    from cad_app.picker import FacePickResult, Picker
+    from cad_app.scene import Scene
+    from cad_app.types import SelectionKind, SelectionRef
+
+    body_a = BRepPrimAPI_MakeCylinder(10.0, 30.0).Shape()
+    body_b = BRepPrimAPI_MakeCylinder(10.0, 30.0).Shape()
+    scene = Scene()
+    item_a = scene.add_shape(body_a, meta={"kind": "body", "source": "a"})
+    item_b = scene.add_shape(body_b, meta={"kind": "body", "source": "b"})
+    picker = Picker(scene)
+
+    side_a_index = next(
+        idx
+        for idx in range(1, picker.count_subshapes(item_a, SelectionKind.FACE) + 1)
+        if not Picker._is_planar_face(picker.subshape(item_a, SelectionKind.FACE, idx))
+    )
+    top_b_index = _find_face_index_with_normal(picker, item_b, (0.0, 0.0, 1.0))
+
+    side_a_ref = SelectionRef(item_a, SelectionKind.FACE, side_a_index)
+    top_b_ref = SelectionRef(item_b, SelectionKind.FACE, top_b_index)
+
+    def fake_ray_pick_faces(
+        item_id, _shape, _origin, _direction, _eye, distance_px=0.0
+    ):
+        if item_id == item_a:
+            # Body A: curved side hit by centre + every halo (cursor is over it).
+            return [
+                FacePickResult(
+                    selection=side_a_ref,
+                    depth=20.0,
+                    distance_px=distance_px,
+                    is_planar=False,
+                )
+            ]
+        if item_id == item_b and 0.001 < distance_px <= 4.0:
+            # Body B: a halo ray slips off the side of A and reaches B's
+            # planar top. The centre ray does NOT reach B.
+            return [
+                FacePickResult(
+                    selection=top_b_ref,
+                    depth=50.0,
+                    distance_px=distance_px,
+                    is_planar=True,
+                    is_front_facing=True,
+                )
+            ]
+        return []
+
+    monkeypatch.setattr(picker, "_ray_pick_faces", fake_ray_pick_faces)
+
+    view = _OrthoView()
+    result = picker.pick_face_result_at(view, 0, 0)
+    assert result is not None
+    assert result.selection.item_id == item_a, (
+        "Centre-hit body A must keep the click. A planar face on body B "
+        "reached only by halo through a gap may not steal it."
+    )
+
+
+def test_pick_face_is_stable_pixel_by_pixel_across_top_silhouette() -> None:
+    """Sweeping the cursor 1 px at a time across an extruded cylinder's
+    top silhouette must produce a monotonic transition (TOP -> LAT) with
+    no oscillation. Earlier versions flickered (TOP, LAT, TOP, LAT, ...)
+    when the depth-gate criterion swung on the centre ray's hit depth."""
+    require_ocp()
+
+    from cad_app.picker import Picker
+    from cad_app.scene import Scene
+    from cad_app.sketch import extrude_profile, make_circle_profile_at
+    from cad_app.types import SelectionKind
+    from cad_app.workplane import Workplane
+
+    profile = make_circle_profile_at(Workplane.world_xy(), (0.0, 0.0), 30.0)
+    shape = extrude_profile(profile, 91.08)
+    scene = Scene()
+    item_id = scene.add_shape(shape, meta={"kind": "body", "source": "sketch_extrude"})
+    picker = Picker(scene)
+
+    top_index = _find_face_index_with_normal(picker, item_id, (0.0, 0.0, 1.0))
+    lateral_index = next(
+        idx
+        for idx in range(1, picker.count_subshapes(item_id, SelectionKind.FACE) + 1)
+        if not Picker._is_planar_face(picker.subshape(item_id, SelectionKind.FACE, idx))
+    )
+
+    class _AxoView:
+        def __init__(self) -> None:
+            distance = 500.0
+            az = math.radians(45.0)
+            el = math.radians(35.264)
+            cx = math.cos(el) * math.cos(az)
+            cy = math.cos(el) * math.sin(az)
+            cz = math.sin(el)
+            tx, ty, tz = 0.0, 0.0, 45.54
+            self._eye = (
+                tx + cx * distance,
+                ty + cy * distance,
+                tz + cz * distance,
+            )
+            self._dir = (-cx, -cy, -cz)
+            # scale = 0.3 means cylinder is ~80px tall on screen so the
+            # silhouette transition falls in a tight pixel band, which
+            # is exactly where flicker showed up.
+            scale = 0.3
+            self._right = (
+                -math.sin(az) / scale,
+                math.cos(az) / scale,
+                0.0,
+            )
+            self._down = (
+                math.sin(el) * math.cos(az) / scale,
+                math.sin(el) * math.sin(az) / scale,
+                -math.cos(el) / scale,
+            )
+
+        def ConvertWithProj(self, x: int, y: int):
+            origin = tuple(
+                self._eye[i] + self._right[i] * float(x) + self._down[i] * float(y)
+                for i in range(3)
+            )
+            return (*origin, *self._dir)
+
+        def Eye(self):
+            return self._eye
+
+        def Convert(self, world_x: float, world_y: float, world_z: float):
+            return (0.0, 0.0)
+
+    view = _AxoView()
+    indices = []
+    for y in range(-15, 10):
+        result = picker.pick_face_result_at(view, 0, y)
+        if result is None:
+            indices.append(None)
+        else:
+            indices.append(result.selection.index)
+
+    transitions = sum(
+        1
+        for prev, curr in zip(indices, indices[1:])
+        if prev is not None and curr is not None and prev != curr
+    )
+    assert transitions == 1, (
+        "Cursor sweep across the top silhouette must produce exactly one "
+        f"face transition (no flicker). Saw transitions={transitions}, "
+        f"sequence={indices}."
+    )
+
+    top_runs = [i for i, idx in enumerate(indices) if idx == top_index]
+    lat_runs = [i for i, idx in enumerate(indices) if idx == lateral_index]
+    assert top_runs, "Sweep must include at least one TOP pick"
+    assert lat_runs, "Sweep must include at least one LATERAL pick"
+    assert max(top_runs) < min(lat_runs), (
+        "TOP picks must come before LATERAL picks as the cursor moves "
+        f"down past the silhouette. sequence={indices}."
+    )

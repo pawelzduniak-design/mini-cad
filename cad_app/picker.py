@@ -72,7 +72,6 @@ class _FacePickAggregate:
     best_result: FacePickResult
     priority: int
     center_hit: bool
-    center_depth: float | None
     vote_count: int
     min_distance_px: float
     min_depth: float
@@ -293,7 +292,6 @@ class Picker:
                             best_result=result,
                             priority=priority,
                             center_hit=is_center,
-                            center_depth=result.depth if is_center else None,
                             vote_count=1,
                             min_distance_px=result.distance_px,
                             min_depth=result.depth,
@@ -304,11 +302,6 @@ class Picker:
                     aggregate.vote_count += 1
                     if is_center:
                         aggregate.center_hit = True
-                        aggregate.center_depth = (
-                            result.depth
-                            if aggregate.center_depth is None
-                            else min(aggregate.center_depth, result.depth)
-                        )
                     if priority < aggregate.priority:
                         aggregate.priority = priority
                     if result.is_front_facing:
@@ -325,14 +318,16 @@ class Picker:
                         aggregate.min_distance_px = result.distance_px
                         aggregate.min_depth = result.depth
 
-        closest_center_depth = min(
-            (
-                aggregate.center_depth
-                for aggregate in aggregates.values()
-                if aggregate.center_depth is not None
-            ),
-            default=math.inf,
-        )
+        # The planar bonus must only resolve same-body face ambiguity
+        # (cylinder top vs. its side at oblique angles). A planar face
+        # on a DIFFERENT body the cursor isn't actually over - reached
+        # only by a halo ray slipping through a gap - has no business
+        # stealing the click from the body the centre ray hit.
+        centre_hit_items = {
+            selection.item_id
+            for selection, aggregate in aggregates.items()
+            if aggregate.center_hit
+        }
         return [
             aggregate.best_result
             for _selection, aggregate in sorted(
@@ -340,7 +335,7 @@ class Picker:
                 key=lambda kv: (
                     self._face_pick_tier(
                         kv[1],
-                        closest_center_depth,
+                        kv[0].item_id in centre_hit_items,
                     ),
                     kv[1].priority,
                     kv[1].min_distance_px,
@@ -355,7 +350,7 @@ class Picker:
     @staticmethod
     def _face_pick_tier(
         aggregate: _FacePickAggregate,
-        closest_center_depth: float,
+        body_was_centre_hit: bool,
     ) -> int:
         # Tier 0: planar face the centre ray MISSED but a near offset
         #         (within the planar-preference radius) landed on.
@@ -363,13 +358,13 @@ class Picker:
         #         cylinder is a thin ellipse at oblique angles - clicks
         #         1-3 px below the silhouette would otherwise pick the
         #         curved side, but the offset rays still reach the top.
-        #         The candidate must also be at least as close as the
-        #         front centre hit; otherwise the same rule can promote
-        #         the back/bottom cap reached by a halo ray over the
-        #         actual top face under the cursor.
-        #         It must also face the camera. That preserves the
-        #         "easy top cap" behavior while preventing hidden/back
-        #         caps from stealing clicks near the side wall rim.
+        #         The face must also belong to a body the centre ray
+        #         already hit, so the bonus only resolves same-body
+        #         face ambiguity. Without that, a halo ray slipping
+        #         past the actual body could promote a planar face on
+        #         a different body behind it.
+        #         It must also face the camera, preventing hidden/back
+        #         caps from stealing clicks through the body.
         # Tier 1: anything the centre ray hit. Standard "what's under
         #         the cursor wins"; depth tie-break keeps the closest
         #         face (e.g. clicking the side of a cylinder selects
@@ -382,7 +377,7 @@ class Picker:
             and not aggregate.center_hit
             and aggregate.is_front_facing
             and aggregate.min_distance_px <= _PLANAR_PREFERENCE_PX
-            and aggregate.min_depth <= closest_center_depth + 1e-7
+            and body_was_centre_hit
         ):
             return 0
         if aggregate.center_hit:
