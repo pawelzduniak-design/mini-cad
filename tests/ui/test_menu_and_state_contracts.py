@@ -286,13 +286,20 @@ def test_line_close_can_snap_by_screen_distance_after_view_rotation(
     from cad_app.viewer import Viewer
     from cad_app.workplane import Workplane
 
-    class FakeView:
-        def Convert(self, *_args):
-            return (100.0, 100.0)
-
     main_window = create_main_window(Viewer(), Scene())
     widget = main_window.viewer_widget
     widget._viewer.is_initialized = True
+
+    # The view returns post-DPR view pixels; the snap helper divides
+    # by devicePixelRatioF() to compare against the widget-space cursor
+    # (x, y). Scale the fake return so the test passes on HiDPI screens
+    # where DPR may be 1.25, 1.5, or 2.
+    scale = widget.devicePixelRatioF() or 1.0
+
+    class FakeView:
+        def Convert(self, *_args):
+            return (100.0 * scale, 100.0 * scale)
+
     monkeypatch.setattr(widget._viewer, "_view", FakeView())
     session = SketchSession(Workplane.world_xy(), "XY", None, tool="line")
     session.points = [(0.0, 0.0), (40.0, 0.0), (40.0, 20.0)]
