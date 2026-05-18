@@ -53,6 +53,7 @@ __all__ = [
     "_count_cylindrical_faces",
     "_edge_by_index",
     "_edge_vertex_indexes",
+    "_extract_disconnected_solids",
     "_face_by_index",
     "_face_vertex_indexes",
     "_is_occt_exception",
@@ -61,6 +62,7 @@ __all__ = [
     "_move_vertices_via_face_rebuild",
     "_planar_face_normal",
     "_run_boolean",
+    "_solid_volume",
     "_try_rebased_fillet",
     "_updated_fillet_history",
     "_validate_move_vector",
@@ -88,6 +90,42 @@ def _run_boolean(shape_a, shape_b, operation_cls, error_message: str):
     result = operation.Shape()
     validate_shape(result)
     return cleanup_shape(result)
+
+
+def _extract_disconnected_solids(shape):
+    """Return every TopoDS_Solid contained in ``shape``.
+
+    Boolean operations (cut, fuse) sometimes leave the result as a
+    compound of multiple independent solids - for instance, cutting a
+    bar through the middle leaves two pieces. We want those pieces to
+    surface as separate scene items so the user can move, hide, and
+    select them independently; otherwise face indices stay shared and
+    the browser shows one entry for what visually is two bodies.
+
+    For a regular Solid this returns ``[shape]``.
+    """
+    from OCP.TopAbs import TopAbs_SOLID
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopoDS import TopoDS
+
+    solids = []
+    explorer = TopExp_Explorer(shape, TopAbs_SOLID)
+    while explorer.More():
+        solids.append(TopoDS.Solid_s(explorer.Current()))
+        explorer.Next()
+    return solids
+
+
+def _solid_volume(solid) -> float:
+    """Return the volume of a solid; used to pick the 'primary' piece
+    after a boolean operation splits a body. The largest solid keeps
+    the original feature history, the rest become new bodies."""
+    from OCP.BRepGProp import BRepGProp
+    from OCP.GProp import GProp_GProps
+
+    properties = GProp_GProps()
+    BRepGProp.VolumeProperties_s(solid, properties)
+    return float(properties.Mass())
 
 
 def _face_ordered_vertex_indices(face, shape_vertex_map) -> list[int]:

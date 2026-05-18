@@ -21,6 +21,7 @@ from cad_app.command_geometry import (
     _count_cylindrical_faces,
     _edge_by_index,
     _edge_vertex_indexes,
+    _extract_disconnected_solids,
     _face_by_index,
     _face_vertex_indexes,
     _is_occt_exception,
@@ -29,6 +30,7 @@ from cad_app.command_geometry import (
     _move_vertices_via_face_rebuild,
     _planar_face_normal,
     _run_boolean,
+    _solid_volume,
     _try_rebased_fillet,
     _updated_fillet_history,
     _validate_move_vector,
@@ -135,16 +137,39 @@ def apply_extrude_face(
     face_index: int,
     distance: float,
 ) -> TopoDS_Shape:
-    """Apply extrude to a scene object after successful validation."""
+    """Apply extrude to a scene object after successful validation.
+
+    If the extrude (cut) chops the body into multiple disconnected
+    solids, split them into separate scene items so each piece is
+    selectable and movable independently.
+    """
     scene_object = scene.get(item_id)
     step = capture_extrude_face_step(scene_object.shape, face_index, distance)
     result = extrude_face(scene_object.shape, face_index, distance)
-    scene.replace_shape(
-        item_id,
-        result,
-        meta=append_feature_step(scene_object.meta, scene_object.shape, step),
-    )
-    return result
+    new_meta = append_feature_step(scene_object.meta, scene_object.shape, step)
+
+    solids = _extract_disconnected_solids(result)
+    if len(solids) <= 1:
+        scene.replace_shape(item_id, result, meta=new_meta)
+        return result
+
+    # The original item keeps its feature history on the largest
+    # piece; smaller pieces become new bodies without history. They
+    # share a source tag so the browser can show their origin.
+    solids_by_size = sorted(solids, key=_solid_volume, reverse=True)
+    primary, extras = solids_by_size[0], solids_by_size[1:]
+    with scene.transaction():
+        scene.replace_shape(item_id, primary, meta=new_meta)
+        for extra in extras:
+            scene.add_shape(
+                extra,
+                meta={
+                    "kind": "body",
+                    "source": "extrude_split",
+                    "parent_item_id": item_id,
+                },
+            )
+    return primary
 
 
 def add_circle_feature(

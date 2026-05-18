@@ -275,6 +275,90 @@ def test_boolean_operations_and_scene_apply_contracts() -> None:
     assert scene.get(target_id).meta["last_boolean_operation"] == "union"
 
 
+def test_extract_disconnected_solids_separates_compound_into_pieces() -> None:
+    """A compound that contains multiple independent solids must be
+    reported as a list of those solids - that is the hook
+    apply_extrude_face uses to spawn one scene item per piece when an
+    extrude (cut) splits a body."""
+    require_ocp()
+
+    from OCP.BRep import BRep_Builder
+    from OCP.TopoDS import TopoDS_Compound
+
+    from cad_app.command_geometry import _extract_disconnected_solids, _solid_volume
+    from cad_app.engine import make_box
+
+    box_a = make_box(10.0, 10.0, 10.0)
+    box_b = _translate(make_box(5.0, 5.0, 5.0), 50.0, 50.0, 50.0)
+
+    builder = BRep_Builder()
+    compound = TopoDS_Compound()
+    builder.MakeCompound(compound)
+    builder.Add(compound, box_a)
+    builder.Add(compound, box_b)
+
+    solids = _extract_disconnected_solids(compound)
+    assert len(solids) == 2
+    volumes = sorted(_solid_volume(s) for s in solids)
+    assert volumes[0] == pytest.approx(125.0, rel=1e-6)
+    assert volumes[1] == pytest.approx(1000.0, rel=1e-6)
+
+    single = _extract_disconnected_solids(box_a)
+    assert len(single) == 1
+
+
+def test_apply_extrude_face_splits_disconnected_result_into_scene_items(
+    monkeypatch,
+) -> None:
+    """When extrude_face (cut) produces a compound of multiple solids,
+    apply_extrude_face must keep the largest piece on the original
+    scene item and add the remaining pieces as new bodies. Without
+    this, a cut that visually splits one body into two leaves them
+    sharing one item id, so selection and the browser treat them as
+    the same object."""
+    require_ocp()
+
+    from OCP.BRep import BRep_Builder
+    from OCP.TopoDS import TopoDS_Compound
+
+    from cad_app.commands import apply_extrude_face
+    from cad_app.engine import make_box
+    from cad_app.scene import Scene
+
+    body = make_box(40.0, 40.0, 40.0)
+    big = make_box(20.0, 20.0, 20.0)
+    small = _translate(make_box(5.0, 5.0, 5.0), 100.0, 0.0, 0.0)
+
+    builder = BRep_Builder()
+    compound = TopoDS_Compound()
+    builder.MakeCompound(compound)
+    builder.Add(compound, big)
+    builder.Add(compound, small)
+
+    def fake_extrude(_shape, _face_index, _distance):
+        return compound
+
+    monkeypatch.setattr("cad_app.commands.extrude_face", fake_extrude)
+
+    scene = Scene()
+    item_id = scene.add_shape(body, meta={"kind": "body", "source": "test"})
+    before_items = set(item.item_id for item in scene)
+
+    apply_extrude_face(scene, item_id, face_index=1, distance=-30.0)
+
+    after_items = set(item.item_id for item in scene)
+    assert len(after_items) == 2, (
+        "Disconnected extrude result must spawn a second scene item; "
+        f"got items={after_items}"
+    )
+    new_ids = after_items - before_items
+    assert len(new_ids) == 1
+    new_id = next(iter(new_ids))
+    new_meta = scene.get(new_id).meta
+    assert new_meta.get("source") == "extrude_split"
+    assert new_meta.get("parent_item_id") == item_id
+
+
 def test_boolean_rejects_sketch_profile_as_body_operand() -> None:
     require_ocp()
 
