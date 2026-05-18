@@ -612,16 +612,33 @@ class ViewerWidgetMoveDragMixin(ViewerWidgetMovePreviewMixin):
                     session.index,
                     session.distance,
                 )
-            else:
-                dx, dy, dz = self._face_move_vector(session)
-                apply_move_face_controlled(
+                return
+            dx, dy, dz = self._face_move_vector(session)
+            # Cylinder cap, sphere segment, or any planar face on a body
+            # with curved neighbours rejects the vertex-rebuild path
+            # (move_face_controlled assumes all faces planar). When the
+            # user picks an X/Y/Z manipulator that happens to align with
+            # that face's outward normal, the operation is just a push-
+            # pull along the normal and extrude_face handles it cleanly.
+            # Route through apply_move_face_normal with the signed
+            # projection onto the normal as the push distance.
+            normal_distance = self._face_move_along_normal_distance(session, dx, dy, dz)
+            if normal_distance is not None:
+                apply_move_face_normal(
                     self._scene,
                     session.item_id,
                     session.index,
-                    dx,
-                    dy,
-                    dz,
+                    normal_distance,
                 )
+                return
+            apply_move_face_controlled(
+                self._scene,
+                session.item_id,
+                session.index,
+                dx,
+                dy,
+                dz,
+            )
             return
         if session.target_kind == SelectionKind.EDGE:
             tdx, tdy, tdz = self._edge_move_vector(session)

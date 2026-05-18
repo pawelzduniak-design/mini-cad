@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 
 from cad_app.commands import (
     CommandError,
@@ -208,7 +209,28 @@ class ViewerWidgetMovePreviewMixin:
                 dz,
             )
         if session.target_kind == SelectionKind.FACE:
+            if session.axis_name == "Normal":
+                from cad_app.commands import move_face_normal
+
+                return move_face_normal(
+                    self._scene.get(session.item_id).shape,
+                    session.index,
+                    session.distance,
+                )
             dx, dy, dz = self._face_move_vector(session)
+            # Mirror the apply-time routing: when the move vector lines
+            # up with the planar face's normal, do a push-pull so the
+            # preview also works on curved-body shells where
+            # move_face_controlled would fail (cylinder/torus caps).
+            normal_distance = self._face_move_along_normal_distance(session, dx, dy, dz)
+            if normal_distance is not None:
+                from cad_app.commands import move_face_normal
+
+                return move_face_normal(
+                    self._scene.get(session.item_id).shape,
+                    session.index,
+                    normal_distance,
+                )
             return move_face_controlled(
                 self._scene.get(session.item_id).shape,
                 session.index,
@@ -296,6 +318,52 @@ class ViewerWidgetMovePreviewMixin:
                 dz,
             ),
         )
+
+    def _face_move_along_normal_distance(
+        self,
+        session: MoveSession,
+        dx: float,
+        dy: float,
+        dz: float,
+    ) -> float | None:
+        """Return the signed push-pull distance if ``(dx, dy, dz)`` is
+        approximately parallel to the selected face's planar normal.
+
+        Returning a non-None value tells the apply path to route the
+        move through extrude_face, which works on bodies with curved
+        neighbour faces (cylinder caps, filleted edges) where the
+        all-planar vertex-rebuild path can't help. Returns ``None`` if
+        the face isn't planar, or if the move has a real lateral
+        component that would actually shear the body.
+        """
+        try:
+            from cad_app.commands import face_normal_vector
+        except ModuleNotFoundError:
+            return None
+        try:
+            nx, ny, nz = face_normal_vector(
+                self._scene.get(session.item_id).shape,
+                session.index,
+            )
+        except Exception:
+            return None
+
+        length_squared = dx * dx + dy * dy + dz * dz
+        if length_squared <= 1e-12:
+            return None
+        normal_length = math.sqrt(nx * nx + ny * ny + nz * nz)
+        if normal_length <= 1e-9:
+            return None
+        nx, ny, nz = nx / normal_length, ny / normal_length, nz / normal_length
+
+        projection = dx * nx + dy * ny + dz * nz
+        # The lateral component must vanish to within numerical noise -
+        # otherwise the click really did ask for an off-axis push, and
+        # extrude_face would silently drop that component.
+        lateral_squared = length_squared - projection * projection
+        if lateral_squared > 1e-6 * length_squared:
+            return None
+        return projection
 
     def _vertex_move_vector(
         self,

@@ -354,6 +354,46 @@ def test_apply_boolean_bodies_splits_disconnected_result_into_scene_items(
     assert scene.get(new_id).meta.get("parent_item_id") == target_id
 
 
+def test_move_face_normal_pushes_cylinder_top_cap() -> None:
+    """A cylinder cap is planar but its neighbour (the lateral) is
+    curved, so move_face_controlled rejects it. The Move-along-Normal
+    path delegates to extrude_face and must succeed - otherwise the
+    user can't push or pull a cylinder's top face."""
+    require_ocp()
+
+    from cad_app.commands import move_face_normal
+    from cad_app.picker import Picker
+    from cad_app.sketch import extrude_profile, make_circle_profile
+    from cad_app.types import SelectionKind
+    from cad_app.workplane import Workplane
+
+    profile = make_circle_profile(Workplane.world_xy(), radius=20.0)
+    cylinder = extrude_profile(profile, 50.0)
+
+    top_index = None
+    for index in range(
+        1, Picker.indexed_map(cylinder, SelectionKind.FACE).Extent() + 1
+    ):
+        face = Picker.indexed_map(cylinder, SelectionKind.FACE).FindKey(index)
+        if not Picker._is_planar_face(face):
+            continue
+        from cad_app.commands import face_normal_vector
+
+        normal = face_normal_vector(cylinder, index)
+        if normal[2] > 0.95:
+            top_index = index
+            break
+    assert top_index is not None, "Cylinder must have a +Z top cap"
+
+    pushed = move_face_normal(cylinder, top_index, 10.0)
+    assert_valid_shape(pushed)
+    assert bounding_box(pushed)["height"] == pytest.approx(60.0, abs=1e-3)
+
+    pulled = move_face_normal(cylinder, top_index, -10.0)
+    assert_valid_shape(pulled)
+    assert bounding_box(pulled)["height"] == pytest.approx(40.0, abs=1e-3)
+
+
 def test_apply_extrude_face_splits_disconnected_result_into_scene_items(
     monkeypatch,
 ) -> None:
