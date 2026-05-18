@@ -259,12 +259,12 @@ def test_native_orientation_gizmo_keeps_coordinate_axes(monkeypatch) -> None:
 
 
 def test_qt_orientation_gizmo_paints_view_buttons(qapp, monkeypatch) -> None:
-    """The cube renders only its Top/Front/Right faces, so the other
-    three standard views (Bottom, Back, Left) have no visible target
-    unless the shortcut buttons are also painted. The previous design
-    left those buttons clickable but invisible, which is why users
-    reported 'I can't find the Bottom view' after rotating the
-    camera off the default iso."""
+    """The cube renders only Top/Front/Right; the hidden Back/Left/
+    Bottom views must show as visible labelled buttons or there is no
+    way to reach them without orbiting the camera. The visible cube
+    faces continue to handle Top/Front/Right clicks - duplicating
+    them as buttons created the 'I click Top and Front lights up'
+    confusion because two labels sat in the same screen region."""
     from PySide6.QtGui import QPixmap
 
     from cad_app.viewer_widget_overlays import OrientationGizmoOverlay
@@ -279,7 +279,12 @@ def test_qt_orientation_gizmo_paints_view_buttons(qapp, monkeypatch) -> None:
     overlay.render(pixmap)
 
     assert calls == [True], "View shortcut buttons must be painted exactly once"
-    assert overlay.view_at(78, 18) == ("z", True, "Top")
+    # Cube's Top face polygon still resolves to Top view.
+    assert overlay.view_at(78, 50) == ("z", True, "Top")
+    # New labelled buttons resolve to the three hidden views.
+    assert overlay.view_at(78, 12) == ("y", True, "Back")
+    assert overlay.view_at(20, 90) == ("x", False, "Left")
+    assert overlay.view_at(78, 140) == ("z", False, "Bottom")
 
 
 def test_line_close_can_snap_by_screen_distance_after_view_rotation(

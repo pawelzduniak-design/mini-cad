@@ -18,11 +18,14 @@ class OrientationGizmoOverlay(QWidget):
         self.setObjectName("OrientationGizmoOverlay")
         self.setFixedSize(156, 156)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self._axis_name = "X"
+        # No axis is "active" until a Move or Rotate session sets one.
+        # Defaulting to "X" used to light up the red X arrow permanently
+        # so users thought they were perma-stuck on a Right-axis tool.
+        self._axis_name: str | None = None
         self._press_parent_pos: tuple[int, int] | None = None
         self._dragging = False
 
-    def set_axis_name(self, axis_name: str) -> None:
+    def set_axis_name(self, axis_name: str | None) -> None:
         self._axis_name = axis_name
         self.update()
 
@@ -219,17 +222,16 @@ class OrientationGizmoOverlay(QWidget):
 
     @staticmethod
     def _view_button_rects() -> dict[str, QRectF]:
-        # Position around the cube, never on top of it. The cube spans
-        # roughly x:[46,122], y:[34,118]; these buttons live in the
-        # margin so they don't fight with the cube face highlights or
-        # the X/Y/Z axis arrows that radiate from the cube corner.
+        # Only the three views the cube CAN'T show get explicit
+        # buttons: Back, Left, Bottom. The three visible cube faces
+        # (Top, Front, Right) are already clickable as cube polygons,
+        # so labelling them again as separate buttons was creating
+        # the "I click Top and Front lights up" confusion - two
+        # different labels mapped to the same screen region.
         return {
-            "Top": QRectF(56, 8, 44, 18),
-            "Back": QRectF(8, 8, 40, 18),
-            "Left": QRectF(8, 79, 32, 24),
-            "Right": QRectF(128, 79, 24, 24),
-            "Front": QRectF(108, 8, 40, 18),
-            "Bottom": QRectF(56, 130, 44, 18),
+            "Back": QRectF(60, 6, 36, 18),
+            "Left": QRectF(6, 78, 32, 22),
+            "Bottom": QRectF(60, 132, 36, 18),
         }
 
     @staticmethod

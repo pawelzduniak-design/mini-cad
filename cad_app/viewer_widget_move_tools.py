@@ -519,6 +519,47 @@ class ViewerWidgetMoveToolsMixin:
             return False
         return True
 
+    def _face_move_axis_supported(
+        self,
+        session,
+        axis: tuple[float, float, float],
+    ) -> bool:
+        """Return whether changing a face-move session to ``axis`` will
+        actually commit. On bodies with curved faces (cylinder, fillet
+        torus) move_face_controlled cannot rebuild the shell, so the
+        only axis the apply path can honour is the one parallel to the
+        face's own normal - that goes through extrude_face instead.
+        Blocking the manipulator switch early stops the user from
+        seeing a phantom preview followed by 'Move tool failed'.
+        """
+        if session.target_kind != SelectionKind.FACE:
+            return True
+        try:
+            from cad_app.commands import supports_move_face_controlled
+        except ModuleNotFoundError:
+            return True
+        scene_object = self._scene.get(session.item_id)
+        if supports_move_face_controlled(scene_object.shape, session.index):
+            return True
+        try:
+            nx, ny, nz = self._face_normal(session.item_id, session.index)
+        except (CommandError, IndexError, TypeError, AttributeError, ValueError):
+            return False
+        except ModuleNotFoundError:
+            return False
+        normal_len = (nx * nx + ny * ny + nz * nz) ** 0.5
+        axis_len = sum(component * component for component in axis) ** 0.5
+        if normal_len < 1e-9 or axis_len < 1e-9:
+            return False
+        nx, ny, nz = nx / normal_len, ny / normal_len, nz / normal_len
+        ax, ay, az = (
+            axis[0] / axis_len,
+            axis[1] / axis_len,
+            axis[2] / axis_len,
+        )
+        dot = abs(nx * ax + ny * ay + nz * az)
+        return dot > 1.0 - 1e-6
+
     def _begin_selected_move_normal_tool(self) -> None:
         selection = self._scene.selection()
         if selection is None or selection.kind != SelectionKind.FACE:
@@ -560,6 +601,11 @@ class ViewerWidgetMoveToolsMixin:
         if axis is None or self._move_session is None:
             return
         if self._move_session.tool not in {"move", "sketch_move", "rotate"}:
+            return
+        if not self._face_move_axis_supported(self._move_session, axis):
+            self._show_status(
+                f"Move {axis_name}: face on curved body only supports its normal axis"
+            )
             return
         self._move_session.axis_name = axis_name
         self._move_session.axis = axis

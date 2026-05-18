@@ -412,6 +412,11 @@ class ViewerWidgetMoveDragMixin(ViewerWidgetMovePreviewMixin):
             self._move_session = session
         else:
             self._move_session = None
+            # Same reasoning as _cancel_move_session: release the gizmo
+            # axis highlight when there's no longer a Move/Rotate tool
+            # owning it, so the red X arrow doesn't stay lit forever.
+            if hasattr(self, "_orientation_gizmo_overlay"):
+                self._orientation_gizmo_overlay.set_axis_name(None)
         self._hover_selection = None
         self._hide_edge_dimension_editor()
         self._viewer.clear_preview_marker()
@@ -672,6 +677,11 @@ class ViewerWidgetMoveDragMixin(ViewerWidgetMovePreviewMixin):
         self._viewer.clear_preview_marker()
         self._hide_dimension_overlay()
         self._viewer.clear_extrude_affordance_marker()
+        # Clear the gizmo's "active axis" highlight; otherwise the
+        # arrow stays bold after the tool ends and the user thinks
+        # they're still in a per-axis Move/Rotate session.
+        if hasattr(self, "_orientation_gizmo_overlay"):
+            self._orientation_gizmo_overlay.set_axis_name(None)
         self._show_status(status)
         self._refresh_hud()
 
