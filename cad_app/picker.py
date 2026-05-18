@@ -32,6 +32,7 @@ class FacePickResult:
     selection: SelectionRef
     depth: float
     distance_px: float = 0.0
+    is_planar: bool = False
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,17 @@ class _FacePickAggregate:
     vote_count: int
     min_distance_px: float
     min_depth: float
+    is_planar: bool
+
+
+# When the halo lands a planar face within this many pixels of the
+# cursor, that planar hit beats a curved-face centre hit. This bridges
+# the gap between geometric ray-cast and human perception near face
+# boundaries: from a low elevation angle, a cylinder's top face appears
+# as a thin ellipse, and clicks a few pixels below its silhouette would
+# otherwise select the cylindrical side face. With this rule, "almost
+# on the top" still selects the top.
+_PLANAR_PREFERENCE_PX = 4.0
 
 
 class Picker:
@@ -281,6 +293,7 @@ class Picker:
                             vote_count=1,
                             min_distance_px=result.distance_px,
                             min_depth=result.depth,
+                            is_planar=result.is_planar,
                         )
                         continue
                     aggregate.vote_count += 1
@@ -305,7 +318,7 @@ class Picker:
             for _selection, aggregate in sorted(
                 aggregates.items(),
                 key=lambda kv: (
-                    0 if kv[1].center_hit else 1,
+                    self._face_pick_tier(kv[1]),
                     kv[1].priority,
                     kv[1].min_distance_px,
                     kv[1].min_depth,
@@ -315,6 +328,22 @@ class Picker:
                 ),
             )
         ]
+
+    @staticmethod
+    def _face_pick_tier(aggregate: _FacePickAggregate) -> int:
+        # Tier 0: planar face within the planar-preference radius - wins
+        #         over curved-face centre hits so the top/bottom of a
+        #         cylinder is preferred over its cylindrical side when
+        #         the cursor is near the boundary.
+        # Tier 1: anything the centre ray hit. Standard "what's under
+        #         the cursor wins" behaviour.
+        # Tier 2: everything else - only offset rays touched the face,
+        #         and it isn't a planar-preference candidate.
+        if aggregate.is_planar and aggregate.min_distance_px <= _PLANAR_PREFERENCE_PX:
+            return 0
+        if aggregate.center_hit:
+            return 1
+        return 2
 
     def pick_edge_at(
         self,
@@ -915,10 +944,23 @@ class Picker:
                     selection=selection,
                     depth=depth,
                     distance_px=distance_px,
+                    is_planar=self._is_planar_face(intersector.Face(index)),
                 )
             )
 
         return sorted(results, key=lambda result: result.depth)
+
+    @staticmethod
+    def _is_planar_face(face_shape: TopoDS_Shape) -> bool:
+        from OCP.BRepAdaptor import BRepAdaptor_Surface
+        from OCP.GeomAbs import GeomAbs_Plane
+        from OCP.TopoDS import TopoDS
+
+        try:
+            surface = BRepAdaptor_Surface(TopoDS.Face_s(face_shape))
+        except (RuntimeError, ValueError):
+            return False
+        return surface.GetType() == GeomAbs_Plane
 
     @staticmethod
     def _face_pick_priority(meta: dict[str, object]) -> int:

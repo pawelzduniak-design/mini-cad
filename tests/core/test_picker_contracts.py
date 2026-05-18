@@ -219,3 +219,136 @@ def test_pick_face_prefers_front_body_when_two_bodies_overlap() -> None:
     assert (
         result.selection.item_id == near_id
     ), "Front cylinder must win over the cylinder directly behind it."
+
+
+def test_pick_face_planar_bonus_beats_curved_centre_hit(monkeypatch) -> None:
+    """At an oblique camera angle a cylinder's top face appears as a
+    thin ellipse; the user's click can land 1-3 px below the visible
+    top boundary, where the centre ray hits the curved side face but
+    a halo offset (e.g. 4 px up) reaches the planar top. The planar
+    top must win - this matches user perception ('I clicked on the
+    top') over strict geometric ray-cast ('centre hit the side')."""
+    require_ocp()
+
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeCylinder
+
+    from cad_app.picker import FacePickResult, Picker
+    from cad_app.scene import Scene
+    from cad_app.types import SelectionKind, SelectionRef
+
+    cylinder = BRepPrimAPI_MakeCylinder(10.0, 30.0).Shape()
+    scene = Scene()
+    item_id = scene.add_shape(cylinder, meta={"kind": "body", "source": "cyl"})
+    picker = Picker(scene)
+
+    top_index = _find_face_index_with_normal(picker, item_id, (0.0, 0.0, 1.0))
+    side_index = None
+    for idx in range(1, picker.count_subshapes(item_id, SelectionKind.FACE) + 1):
+        face = picker.subshape(item_id, SelectionKind.FACE, idx)
+        if not Picker._is_planar_face(face):
+            side_index = idx
+            break
+    assert side_index is not None, "Cylinder must have a non-planar side face"
+
+    side_ref = SelectionRef(item_id, SelectionKind.FACE, side_index)
+    top_ref = SelectionRef(item_id, SelectionKind.FACE, top_index)
+
+    def fake_ray_pick_faces(
+        _item_id, _shape, _origin, _direction, _eye, distance_px=0.0
+    ):
+        # Centre ray (distance_px == 0) lands on the curved side face.
+        # Small offsets (<= 4 px) reach the planar top face.
+        if distance_px <= 0.001:
+            return [
+                FacePickResult(
+                    selection=side_ref,
+                    depth=10.0,
+                    distance_px=0.0,
+                    is_planar=False,
+                )
+            ]
+        if distance_px <= 4.0:
+            return [
+                FacePickResult(
+                    selection=top_ref,
+                    depth=5.0,
+                    distance_px=distance_px,
+                    is_planar=True,
+                )
+            ]
+        return []
+
+    monkeypatch.setattr(picker, "_ray_pick_faces", fake_ray_pick_faces)
+
+    view = _OrthoView()
+    result = picker.pick_face_result_at(view, 0, 0)
+    assert result is not None
+    assert result.selection.index == top_index, (
+        "Planar top face hit by a 4-px-or-less offset must beat a "
+        "centre hit on the curved side face."
+    )
+
+
+def test_pick_face_planar_bonus_does_not_apply_beyond_radius(monkeypatch) -> None:
+    """If the planar face is only reached by FAR offsets (> 4 px), the
+    centre hit on the curved face stays the winner. The bonus exists
+    to bridge 1-3 px boundary misses, not to magnet onto distant
+    planar geometry."""
+    require_ocp()
+
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeCylinder
+
+    from cad_app.picker import FacePickResult, Picker
+    from cad_app.scene import Scene
+    from cad_app.types import SelectionKind, SelectionRef
+
+    cylinder = BRepPrimAPI_MakeCylinder(10.0, 30.0).Shape()
+    scene = Scene()
+    item_id = scene.add_shape(cylinder, meta={"kind": "body", "source": "cyl"})
+    picker = Picker(scene)
+
+    top_index = _find_face_index_with_normal(picker, item_id, (0.0, 0.0, 1.0))
+    side_index = None
+    for idx in range(1, picker.count_subshapes(item_id, SelectionKind.FACE) + 1):
+        face = picker.subshape(item_id, SelectionKind.FACE, idx)
+        if not Picker._is_planar_face(face):
+            side_index = idx
+            break
+    assert side_index is not None
+
+    side_ref = SelectionRef(item_id, SelectionKind.FACE, side_index)
+    top_ref = SelectionRef(item_id, SelectionKind.FACE, top_index)
+
+    def fake_ray_pick_faces(
+        _item_id, _shape, _origin, _direction, _eye, distance_px=0.0
+    ):
+        if distance_px <= 0.001:
+            return [
+                FacePickResult(
+                    selection=side_ref,
+                    depth=10.0,
+                    distance_px=0.0,
+                    is_planar=False,
+                )
+            ]
+        # Only the FAR halo rays (8 px) reach the top face.
+        if distance_px >= 7.9:
+            return [
+                FacePickResult(
+                    selection=top_ref,
+                    depth=5.0,
+                    distance_px=distance_px,
+                    is_planar=True,
+                )
+            ]
+        return []
+
+    monkeypatch.setattr(picker, "_ray_pick_faces", fake_ray_pick_faces)
+
+    view = _OrthoView()
+    result = picker.pick_face_result_at(view, 0, 0)
+    assert result is not None
+    assert result.selection.index == side_index, (
+        "Centre hit on curved face must stay the winner when the only "
+        "planar candidate is beyond the planar-preference radius."
+    )
