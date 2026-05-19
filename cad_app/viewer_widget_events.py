@@ -1103,18 +1103,28 @@ class ViewerWidgetEventMixin:
             return "BOTTOM(-Z)"
         return f"side(normal={nx:+.2f},{ny:+.2f},{nz:+.2f})"
 
-    def _forward_click_to_view_cube(self, x: int, y: int) -> None:
-        """Route a click that landed in the gizmo corner to OCCT so its
-        AIS_ViewCube can run its built-in camera animation. We can't
-        let the click reach normal Qt event handling (that would
-        commit any active Move session) but we still want the cube to
-        respond to clicks on its visible faces; OCCT does that for us
-        when we call ``context.SelectDetected()`` while the cube is
-        under the cursor.
+    def _forward_click_to_view_cube(self, x: int, y: int) -> bool:
+        """Switch the camera to whichever orientation the OCCT
+        AIS_ViewCube face under the cursor represents.
+
+        Returns True if the click landed on a cube face and the view
+        was updated, False otherwise so the caller can fall through
+        to normal selection.
+
+        ``context.SelectDetected()`` alone would set up OCCT's own
+        AIS_AnimationCamera but the app doesn't run an animation
+        loop, so the camera never actually moved. Read the clicked
+        face's MainOrientation directly off the AIS_ViewCubeOwner and
+        apply it via the same navigation path the orientation buttons
+        use, so the camera snaps to the new view immediately.
         """
         if not self._viewer.is_initialized:
-            return
+            return False
         view_x, view_y = self._to_view_pixels(x, y)
+        try:
+            from OCP.AIS import AIS_ViewCubeOwner
+        except ModuleNotFoundError:
+            return False
         try:
             self._viewer.context.MoveTo(
                 int(view_x),
@@ -1122,10 +1132,56 @@ class ViewerWidgetEventMixin:
                 self._viewer.view,
                 True,
             )
-            if self._viewer.context.HasDetectedShape():
-                self._viewer.context.SelectDetected()
+            if not self._viewer.context.HasDetected():
+                return False
+            owner = self._viewer.context.DetectedOwner()
+            if owner is None:
+                return False
+            cube_owner = AIS_ViewCubeOwner.DownCast_s(owner)
+            if cube_owner is None:
+                return False
+            orientation = cube_owner.MainOrientation()
         except Exception:
-            LOGGER.debug("View cube click forwarding failed", exc_info=True)
+            LOGGER.debug("View cube click detection failed", exc_info=True)
+            return False
+        target = self._view_axis_from_v3d_orientation(orientation)
+        if target is None:
+            return False
+        axis, positive, label = target
+        self._apply_orientation_gizmo_target(axis, positive, label)
+        return True
+
+    @staticmethod
+    def _view_axis_from_v3d_orientation(orientation):
+        """Map an OCCT V3d_TypeOfOrientation enum to our
+        ``(axis, positive, label)`` tuple. The Zup_* aliases share
+        integer values with V3d_X/Y/Zpos/neg so we match on the
+        underlying integer rather than maintaining six enum
+        imports."""
+        try:
+            value = int(orientation)
+        except (TypeError, ValueError):
+            return None
+        try:
+            from OCP.V3d import (
+                V3d_Xneg,
+                V3d_Xpos,
+                V3d_Yneg,
+                V3d_Ypos,
+                V3d_Zneg,
+                V3d_Zpos,
+            )
+        except ModuleNotFoundError:
+            return None
+        mapping = {
+            int(V3d_Xpos): ("x", True, "Right"),
+            int(V3d_Xneg): ("x", False, "Left"),
+            int(V3d_Ypos): ("y", True, "Back"),
+            int(V3d_Yneg): ("y", False, "Front"),
+            int(V3d_Zpos): ("z", True, "Top"),
+            int(V3d_Zneg): ("z", False, "Bottom"),
+        }
+        return mapping.get(value)
 
     def _set_rotate_pivot_from_click(self, x: int, y: int) -> bool:
         """Shift+click while in Rotate: re-pick the pivot from whatever
