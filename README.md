@@ -1,11 +1,12 @@
 # mini-cad
 
-A small direct-modeling CAD I vibe-coded with AI to understand how CAD
-actually works — sketches, workplanes, booleans, the lot.
+A small direct-modeling CAD I built (vibe-coded, with heavy AI help) because I
+needed to **prototype simple 3D models fast** — sketch something, extrude it,
+cut, move, fillet, export STEP, move on.
 
-It is **not** trying to be FreeCAD or Fusion. On purpose. The goal was a
-compact, hackable desktop CAD I could read end-to-end and bend around my own
-workflow: sketch → extrude → cut → move → fillet → save → export.
+It is **not** trying to be FreeCAD or Fusion. On purpose. The goal is a compact,
+no-friction desktop CAD for quick model prototyping: open it, get a shape out,
+export, done — without fighting a heavyweight tool.
 
 <p align="center">
   <img src="docs/images/hero.png" alt="mini-cad — direct-modeling CAD" width="820">

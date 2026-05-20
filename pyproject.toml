@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cad_app"
 version = "0.1.0"
-description = "mini-cad - a small, hackable direct-modeling CAD prototype"
+description = "mini-cad - a small direct-modeling CAD for fast model prototyping"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
