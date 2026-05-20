@@ -15,10 +15,15 @@ from cad_app.commands import (
     apply_move_edge_controlled,
     apply_move_face_controlled,
     apply_move_face_normal,
+    apply_move_face_oblique_shear,
     apply_move_object,
     apply_move_vertex_controlled,
     apply_rotate_object,
+    face_normal_vector,
+    is_oblique_shear_body,
+    supports_move_face_oblique_shear,
 )
+from cad_app.sketch import is_sketch_object, is_sketch_profile
 from cad_app.types import SelectionKind
 from cad_app.ui_sessions import (
     EXTRUDE_DRAG_FALLBACK_AXIS,
@@ -33,6 +38,10 @@ from cad_app.viewer_widget_move_preview import ViewerWidgetMovePreviewMixin
 LOGGER = logging.getLogger(__name__)
 
 DRAG_SNAP_STEP = 1.0
+# How close (mm) a move must land to another body's vertex before it
+# snaps onto it (View drag) or aligns with its coordinate along the move
+# axis (axis-constrained drag).
+MOVE_VERTEX_SNAP_TOLERANCE = 1.5
 
 BROWSER_ITEM_ID_ROLE = Qt.UserRole
 BROWSER_SELECTION_KIND_ROLE = Qt.UserRole + 1
@@ -95,9 +104,8 @@ class ViewerWidgetMoveDragMixin(ViewerWidgetMovePreviewMixin):
                 sum(component * component for component in self._move_session.vector)
             )
             if snap:
-                snapped = tuple(
-                    round(c / DRAG_SNAP_STEP) * DRAG_SNAP_STEP
-                    for c in self._move_session.vector
+                snapped = self._snapped_move_vector(
+                    self._move_session, self._move_session.vector
                 )
                 self._move_session.vector = snapped
                 self._move_session.distance = math.sqrt(sum(c * c for c in snapped))
@@ -122,8 +130,8 @@ class ViewerWidgetMoveDragMixin(ViewerWidgetMovePreviewMixin):
         if self._move_session.tool in {"fillet", "chamfer"}:
             self._move_session.distance = max(0.0, self._move_session.distance)
         if snap:
-            self._move_session.distance = (
-                round(self._move_session.distance / DRAG_SNAP_STEP) * DRAG_SNAP_STEP
+            self._move_session.distance = self._snapped_move_distance(
+                self._move_session, self._move_session.distance
             )
         self._update_move_preview()
         self._update_extrude_affordance()
@@ -369,6 +377,97 @@ class ViewerWidgetMoveDragMixin(ViewerWidgetMovePreviewMixin):
             (z_min + z_max) * 0.5,
         )
 
+    def _snapped_move_distance(self, session: MoveSession, distance: float) -> float:
+        """Snap an axis-constrained move distance.
+
+        Prefers aligning the moved anchor's coordinate along the move axis
+        with another body's vertex (e.g. "level with that corner"); falls
+        back to rounding to the grid step.
+        """
+        grid = round(distance / DRAG_SNAP_STEP) * DRAG_SNAP_STEP
+        anchor = self._move_anchor_point(session)
+        axis = session.axis
+        axis_len = math.sqrt(sum(component * component for component in axis))
+        if anchor is None or axis_len < 1e-9:
+            return grid
+        ux, uy, uz = axis[0] / axis_len, axis[1] / axis_len, axis[2] / axis_len
+        exclude = set(session.item_ids or (session.item_id,))
+        best_distance: float | None = None
+        best_error = MOVE_VERTEX_SNAP_TOLERANCE
+        for vx, vy, vz in self._other_body_vertices_world(exclude):
+            along = (
+                (vx - anchor[0]) * ux + (vy - anchor[1]) * uy + (vz - anchor[2]) * uz
+            )
+            error = abs(along - distance)
+            if error < best_error:
+                best_error = error
+                best_distance = along
+        return best_distance if best_distance is not None else grid
+
+    def _snapped_move_vector(
+        self,
+        session: MoveSession,
+        vector: tuple[float, float, float],
+    ) -> tuple[float, float, float]:
+        """Snap a free (View) move vector to a nearby other-body vertex,
+        else round each component to the grid step."""
+        anchor = self._move_anchor_point(session)
+        if anchor is not None:
+            target = (
+                anchor[0] + vector[0],
+                anchor[1] + vector[1],
+                anchor[2] + vector[2],
+            )
+            exclude = set(session.item_ids or (session.item_id,))
+            best = None
+            best_distance = MOVE_VERTEX_SNAP_TOLERANCE
+            for vertex in self._other_body_vertices_world(exclude):
+                distance = math.dist(vertex, target)
+                if distance < best_distance:
+                    best_distance = distance
+                    best = vertex
+            if best is not None:
+                return (
+                    best[0] - anchor[0],
+                    best[1] - anchor[1],
+                    best[2] - anchor[2],
+                )
+        return tuple(round(c / DRAG_SNAP_STEP) * DRAG_SNAP_STEP for c in vector)
+
+    def _other_body_vertices_world(
+        self, exclude_ids: set[str]
+    ) -> list[tuple[float, float, float]]:
+        """World-space vertices of every body except the moved one(s).
+
+        Defensive against OCCT errors: returns whatever it could read so
+        a single bad shape never blocks the drag.
+        """
+        try:
+            from OCP.BRep import BRep_Tool
+            from OCP.TopAbs import TopAbs_VERTEX
+            from OCP.TopExp import TopExp
+            from OCP.TopoDS import TopoDS
+            from OCP.TopTools import TopTools_IndexedMapOfShape
+        except ModuleNotFoundError:
+            return []
+        vertices: list[tuple[float, float, float]] = []
+        for scene_object in self._scene:
+            if scene_object.item_id in exclude_ids:
+                continue
+            if is_sketch_object(scene_object.meta) or is_sketch_profile(
+                scene_object.meta
+            ):
+                continue
+            try:
+                vmap = TopTools_IndexedMapOfShape()
+                TopExp.MapShapes_s(scene_object.shape, TopAbs_VERTEX, vmap)
+            except (RuntimeError, ValueError):
+                continue
+            for index in range(1, vmap.Extent() + 1):
+                point = BRep_Tool.Pnt_s(TopoDS.Vertex_s(vmap.FindKey(index)))
+                vertices.append((point.X(), point.Y(), point.Z()))
+        return vertices
+
     def _commit_move_session(self) -> None:
         session = self._move_session
         if session is None:
@@ -403,7 +502,7 @@ class ViewerWidgetMoveDragMixin(ViewerWidgetMovePreviewMixin):
                 exc_info=True,
             )
             self._cancel_move_session(
-                status=f"{self ._move_tool_name (session )} failed"
+                status=self._move_commit_failure_status(session, exc)
             )
             return
         keep_move_active = self._keep_move_session_active_after_commit(session)
@@ -511,6 +610,34 @@ class ViewerWidgetMoveDragMixin(ViewerWidgetMovePreviewMixin):
             return "Chamfer"
         return session.tool.replace("_", " ").title()
 
+    def _move_commit_failure_status(
+        self, session: MoveSession, exc: BaseException
+    ) -> str:
+        """Compose a user-friendly status bar message for a failed
+        move/fillet/chamfer commit. For fillet/chamfer specifically,
+        surface the last radius the preview accepted so the user
+        knows what range works for the picked edge."""
+        tool_name = self._move_tool_name(session)
+        if session.tool in {"fillet", "chamfer", "fillet_chamfer"}:
+            radius = abs(float(session.distance))
+            last_ok = session.last_successful_preview_distance
+            if last_ok is not None and abs(last_ok) > 1e-7:
+                return (
+                    f"{tool_name} R={radius:.2f} mm too large for this edge "
+                    f"— try R <= {abs(last_ok):.2f} mm"
+                )
+            return (
+                f"{tool_name} R={radius:.2f} mm failed for this edge — "
+                "try a smaller radius or pick a different edge"
+            )
+        # UnsupportedTopologyError carries a user-meaningful reason (e.g.
+        # an open-shell body that cannot be sealed); surface it verbatim.
+        from cad_app.commands import UnsupportedTopologyError
+
+        if isinstance(exc, UnsupportedTopologyError):
+            return f"{tool_name}: {exc}"
+        return f"{tool_name} failed"
+
     def _apply_move_session(self, session: MoveSession) -> None:
         if session.tool == "sketch_move":
             self._apply_sketch_move(
@@ -610,11 +737,34 @@ class ViewerWidgetMoveDragMixin(ViewerWidgetMovePreviewMixin):
                     apply_move_object(self._scene, item_id, dx, dy, dz)
             return
         if session.target_kind == SelectionKind.FACE:
+            shape = self._scene.get(session.item_id).shape
+            face_index = session.index
+            already_oblique = is_oblique_shear_body(shape, face_index)
             if session.axis_name == "Normal":
+                # An already-sheared body's lateral surface no longer
+                # matches the straight prism that extrude_face cuts,
+                # so a normal push-pull leaves the oblique walls
+                # anchored while the cap drops alone. Route through
+                # the loft rebuild so the moved cap re-establishes the
+                # ruled lateral surface in its new position.
+                if already_oblique:
+                    nx, ny, nz = face_normal_vector(shape, face_index)
+                    dx = nx * session.distance
+                    dy = ny * session.distance
+                    dz = nz * session.distance
+                    apply_move_face_oblique_shear(
+                        self._scene,
+                        session.item_id,
+                        face_index,
+                        dx,
+                        dy,
+                        dz,
+                    )
+                    return
                 apply_move_face_normal(
                     self._scene,
                     session.item_id,
-                    session.index,
+                    face_index,
                     session.distance,
                 )
                 return
@@ -628,18 +778,35 @@ class ViewerWidgetMoveDragMixin(ViewerWidgetMovePreviewMixin):
             # Route through apply_move_face_normal with the signed
             # projection onto the normal as the push distance.
             normal_distance = self._face_move_along_normal_distance(session, dx, dy, dz)
-            if normal_distance is not None:
+            if normal_distance is not None and not already_oblique:
                 apply_move_face_normal(
                     self._scene,
                     session.item_id,
-                    session.index,
+                    face_index,
                     normal_distance,
+                )
+                return
+            # Off-normal move on a cap of a curved-side body (cylinder,
+            # frustum): re-loft the body from the stationary cap to the
+            # translated moved-cap so the user gets an oblique
+            # cylinder. ``move_face_controlled`` would refuse this
+            # topology because not every face is planar. Also covers
+            # follow-up moves on an already-oblique body, where even a
+            # normal-parallel push must be a loft rebuild.
+            if supports_move_face_oblique_shear(shape, face_index):
+                apply_move_face_oblique_shear(
+                    self._scene,
+                    session.item_id,
+                    face_index,
+                    dx,
+                    dy,
+                    dz,
                 )
                 return
             apply_move_face_controlled(
                 self._scene,
                 session.item_id,
-                session.index,
+                face_index,
                 dx,
                 dy,
                 dz,

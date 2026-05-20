@@ -264,14 +264,34 @@ class ViewerWidgetBrowserMixin:
                     command=f"rebuild_history:{active_item_id}",
                     tooltip="Rebuild the active body from stored feature parameters.",
                 )
+                same_kind_counts: dict[tuple[str, str], int] = {}
                 for index, step in enumerate(
                     feature_history_steps(active.meta),
                     start=1,
                 ):
                     step_index = index - 1
+                    # Per-kind numbering. For sketch_profile_feature we
+                    # split add (boss) and cut so a "Sketch Cut 1 / 2"
+                    # series doesn't share its counter with bosses.
+                    kind = str(step.get("kind"))
+                    sub_kind = kind
+                    if kind == "sketch_profile_feature":
+                        sub_kind = (
+                            "cut"
+                            if float(step.get("params", {}).get("distance", 0.0)) < 0
+                            else "boss"
+                        )
+                    counter_key = (kind, sub_kind)
+                    same_kind_counts[counter_key] = (
+                        same_kind_counts.get(counter_key, 0) + 1
+                    )
                     self._add_browser_item(
                         history_list,
-                        feature_step_label(step, index),
+                        feature_step_label(
+                            step,
+                            index,
+                            same_kind_index=same_kind_counts[counter_key],
+                        ),
                         command=f"edit_feature:{active_item_id}:{step_index}",
                         tooltip="Edit this feature step and rebuild downstream steps.",
                     )

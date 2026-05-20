@@ -388,6 +388,31 @@ class ViewerWidgetEventMixin:
             self._refresh_move_manipulator()
         event.accept()
 
+    def _orbit_view_step(self, direction: str, *, fine: bool = False) -> None:
+        """Orbit the camera around the object one arrow-key step.
+
+        The grab point is the viewport centre, so the body stays roughly
+        framed while the camera swings around it. Step size scales with
+        the viewport so the nudge feels the same on any window; Shift
+        halves it for finer control.
+        """
+        if not self._viewer.is_initialized:
+            return
+        span = max(24.0, min(self.width(), self.height()) * 0.12)
+        if fine:
+            span *= 0.4
+        deltas = {
+            "left": (-span, 0.0),
+            "right": (span, 0.0),
+            "up": (0.0, -span),
+            "down": (0.0, span),
+        }
+        dx, dy = deltas[direction]
+        self._navigation.orbit_by(self.width() / 2.0, self.height() / 2.0, dx, dy)
+        self._viewer.refresh_native_window()
+        self._refresh_overlays_after_camera_change()
+        self._show_status(f"Orbit {direction}")
+
     def _refresh_overlays_after_camera_change(self) -> None:
         self._position_edge_dimension_editor()
         self._position_grid_axis_labels_overlay()
@@ -427,6 +452,16 @@ class ViewerWidgetEventMixin:
                 self._set_selection_filter("edges")
                 return
         if event.key() == Qt.Key_Space and self._handle_spacebar_sketch_start():
+            return
+        if event.key() in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
+            direction = {
+                Qt.Key_Left: "left",
+                Qt.Key_Right: "right",
+                Qt.Key_Up: "up",
+                Qt.Key_Down: "down",
+            }[event.key()]
+            fine = bool(event.modifiers() & Qt.ShiftModifier)
+            self._orbit_view_step(direction, fine=fine)
             return
         if event.key() == Qt.Key_F:
             self._fit_all()
@@ -1117,6 +1152,13 @@ class ViewerWidgetEventMixin:
         face's MainOrientation directly off the AIS_ViewCubeOwner and
         apply it via the same navigation path the orientation buttons
         use, so the camera snaps to the new view immediately.
+
+        ``AIS_ViewCubeOwner.DownCast_s`` does not exist on the OCP
+        binding shipped with this project, so the previous attempt
+        raised AttributeError inside the broad ``except`` and the
+        click silently did nothing. pybind11 already returns the
+        concrete derived type from ``DetectedOwner()``, so a plain
+        ``isinstance`` check is enough.
         """
         if not self._viewer.is_initialized:
             return False
@@ -1133,23 +1175,122 @@ class ViewerWidgetEventMixin:
                 True,
             )
             if not self._viewer.context.HasDetected():
+                LOGGER.debug(
+                    "View cube click: nothing detected at view=(%d,%d)",
+                    view_x,
+                    view_y,
+                )
                 return False
             owner = self._viewer.context.DetectedOwner()
             if owner is None:
                 return False
-            cube_owner = AIS_ViewCubeOwner.DownCast_s(owner)
-            if cube_owner is None:
+            if not isinstance(owner, AIS_ViewCubeOwner):
+                LOGGER.debug(
+                    "View cube click: detected non-cube owner %s",
+                    type(owner).__name__,
+                )
                 return False
-            orientation = cube_owner.MainOrientation()
+            orientation = owner.MainOrientation()
         except Exception:
             LOGGER.debug("View cube click detection failed", exc_info=True)
             return False
         target = self._view_axis_from_v3d_orientation(orientation)
-        if target is None:
+        if target is not None:
+            axis, positive, label = target
+            LOGGER.info(
+                "View cube click -> %s (%s%s)",
+                label,
+                axis,
+                "+" if positive else "-",
+            )
+            self._apply_orientation_gizmo_target(axis, positive, label)
+            return True
+        # Edge / corner clicks (e.g. V3d_XposYposZpos) are valid view
+        # cube targets but don't reduce to a single cardinal axis. Use
+        # OCCT's SetProj(enum) overload so any of the 26 valid
+        # orientations snaps the camera the same way the OCCT cube
+        # would have animated to.
+        return self._apply_view_cube_orientation(orientation)
+
+    def _apply_view_cube_orientation(self, orientation) -> bool:
+        if not self._viewer.is_initialized:
             return False
-        axis, positive, label = target
-        self._apply_orientation_gizmo_target(axis, positive, label)
+        view = self._viewer.view
+        if not hasattr(view, "SetProj"):
+            return False
+        try:
+            view.SetProj(orientation, False)
+        except Exception:
+            LOGGER.debug(
+                "SetProj(enum) failed for orientation %s",
+                int(orientation),
+                exc_info=True,
+            )
+            return False
+        if hasattr(view, "ZFitAll"):
+            view.ZFitAll()
+        if hasattr(view, "Redraw"):
+            view.Redraw()
+        self._navigation.capture_home()
+        self._viewer.refresh_native_window()
+        self._refresh_overlays_after_camera_change()
+        label = self._view_cube_orientation_label(int(orientation))
+        self._show_status(f"View: {label}")
+        if hasattr(self, "_schedule_viewport_activation_refresh"):
+            self._schedule_viewport_activation_refresh()
+        LOGGER.info("View cube click -> %s (orientation=%d)", label, int(orientation))
         return True
+
+    @staticmethod
+    def _view_cube_orientation_label(value: int) -> str:
+        try:
+            from OCP.V3d import (
+                V3d_XnegYneg,
+                V3d_XnegYnegZneg,
+                V3d_XnegYnegZpos,
+                V3d_XnegYpos,
+                V3d_XnegYposZneg,
+                V3d_XnegYposZpos,
+                V3d_XnegZneg,
+                V3d_XnegZpos,
+                V3d_XposYneg,
+                V3d_XposYnegZneg,
+                V3d_XposYnegZpos,
+                V3d_XposYpos,
+                V3d_XposYposZneg,
+                V3d_XposYposZpos,
+                V3d_XposZneg,
+                V3d_XposZpos,
+                V3d_YnegZneg,
+                V3d_YnegZpos,
+                V3d_YposZneg,
+                V3d_YposZpos,
+            )
+        except ModuleNotFoundError:
+            return "Iso"
+        mapping = {
+            int(V3d_XposYposZpos): "Iso (Right-Back-Top)",
+            int(V3d_XposYnegZpos): "Iso (Right-Front-Top)",
+            int(V3d_XnegYposZpos): "Iso (Left-Back-Top)",
+            int(V3d_XnegYnegZpos): "Iso (Left-Front-Top)",
+            int(V3d_XposYposZneg): "Iso (Right-Back-Bottom)",
+            int(V3d_XposYnegZneg): "Iso (Right-Front-Bottom)",
+            int(V3d_XnegYposZneg): "Iso (Left-Back-Bottom)",
+            int(V3d_XnegYnegZneg): "Iso (Left-Front-Bottom)",
+            int(V3d_XposYpos): "Edge (Right-Back)",
+            int(V3d_XposYneg): "Edge (Right-Front)",
+            int(V3d_XnegYpos): "Edge (Left-Back)",
+            int(V3d_XnegYneg): "Edge (Left-Front)",
+            int(V3d_XposZpos): "Edge (Right-Top)",
+            int(V3d_XposZneg): "Edge (Right-Bottom)",
+            int(V3d_XnegZpos): "Edge (Left-Top)",
+            int(V3d_XnegZneg): "Edge (Left-Bottom)",
+            int(V3d_YposZpos): "Edge (Back-Top)",
+            int(V3d_YposZneg): "Edge (Back-Bottom)",
+            int(V3d_YnegZpos): "Edge (Front-Top)",
+            int(V3d_YnegZneg): "Edge (Front-Bottom)",
+        }
+        return mapping.get(value, f"Orientation #{value}")
 
     @staticmethod
     def _view_axis_from_v3d_orientation(orientation):

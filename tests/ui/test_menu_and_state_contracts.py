@@ -45,8 +45,11 @@ def test_category_rail_and_initial_context(qapp) -> None:
         action.objectName() for action in top_toolbar.actions() if action.objectName()
     ]
     assert "new_project" in top_actions
+    # save_project lives in the File menu only, not on the top toolbar.
     assert "save_project" not in top_actions
-    assert not main_window.actions["save_project"].isVisible()
+    # Save is a real feature now (native .cadproj writer), so the action
+    # exists and is visible; it's just enabled only when there is a body.
+    assert main_window.actions["save_project"].isVisible()
     rail_actions = [
         action.objectName()
         for action in category_toolbar.actions()

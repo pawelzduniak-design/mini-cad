@@ -76,7 +76,10 @@ class ViewerWidgetSketchPlaneMixin:
                     selection.index,
                 )
             )
-            workplane = Workplane.from_face(face)
+            if getattr(self, "_workplane_anchor", "centroid") == "corner":
+                workplane = Workplane.from_face_corner(face)
+            else:
+                workplane = Workplane.from_face(face)
         except (CommandError, IndexError, ValueError) as exc:
             LOGGER.debug("Hovered face cannot start sketch: %s", exc, exc_info=True)
             self._show_status("Planar face required")

@@ -71,6 +71,18 @@ THREAD_PRESETS: tuple[ThreadPreset, ...] = (
     _iso_thread("M10x1.5", 10.0, 1.5),
     _iso_thread("M12x1.75", 12.0, 1.75),
     _iso_thread("M16x2.0", 16.0, 2.0),
+    _iso_thread("M20x2.5", 20.0, 2.5),
+    _iso_thread("M24x3.0", 24.0, 3.0),
+    _iso_thread("M30x3.5", 30.0, 3.5),
+    _iso_thread("M36x4.0", 36.0, 4.0),
+    _iso_thread("M42x4.5", 42.0, 4.5),
+    _iso_thread("M48x5.0", 48.0, 5.0),
+    _iso_thread("M56x5.5", 56.0, 5.5),
+    _iso_thread("M64x6.0", 64.0, 6.0),
+    _iso_thread("M72x6.0", 72.0, 6.0),
+    _iso_thread("M80x6.0", 80.0, 6.0),
+    _iso_thread("M90x6.0", 90.0, 6.0),
+    _iso_thread("M100x6.0", 100.0, 6.0),
     _unc_thread("#4-40", 0.112, 40),
     _unc_thread("#6-32", 0.138, 32),
     _unc_thread("#8-32", 0.164, 32),
@@ -80,6 +92,55 @@ THREAD_PRESETS: tuple[ThreadPreset, ...] = (
     _unc_thread("3/8-16", 0.375, 16),
     _unc_thread("1/2-13", 0.500, 13),
 )
+
+
+# ISO coarse pitch reference points used as a fallback for Custom
+# threads when no preset matches the picked diameter. Without this,
+# a 80 mm diameter cylinder defaulted to a 1.0 mm pitch (~80 turns
+# along an 80 mm body), giving a 25+ second rebuild that the user
+# experienced as the app freezing.
+_ISO_COARSE_PITCH_TABLE: tuple[tuple[float, float], ...] = (
+    (3.0, 0.5),
+    (4.0, 0.7),
+    (5.0, 0.8),
+    (6.0, 1.0),
+    (8.0, 1.25),
+    (10.0, 1.5),
+    (12.0, 1.75),
+    (16.0, 2.0),
+    (20.0, 2.5),
+    (24.0, 3.0),
+    (30.0, 3.5),
+    (36.0, 4.0),
+    (42.0, 4.5),
+    (48.0, 5.0),
+    (56.0, 5.5),
+    (64.0, 6.0),
+    (72.0, 6.0),
+    (80.0, 6.0),
+    (90.0, 6.0),
+    (100.0, 6.0),
+)
+
+
+def default_thread_pitch_for_diameter(diameter: float) -> float:
+    """Return a sensible default pitch for the given thread diameter.
+
+    Picks the next ISO coarse-pitch step at or above the diameter; for
+    diameters past M64 (where ISO does not standardise coarse pitch
+    further) the pitch grows roughly with diameter so a 100 mm body
+    still rebuilds in a fraction of a second.
+    """
+    if diameter <= 0:
+        raise ValueError("Thread diameter must be positive.")
+    if diameter <= _ISO_COARSE_PITCH_TABLE[0][0]:
+        return _ISO_COARSE_PITCH_TABLE[0][1]
+    for size, pitch in _ISO_COARSE_PITCH_TABLE:
+        if diameter <= size + 1e-9:
+            return pitch
+    # Above M64: keep the thread count roughly proportional to the
+    # diameter so very large cylinders don't get hundreds of turns.
+    return max(_ISO_COARSE_PITCH_TABLE[-1][1], diameter / 12.0)
 
 
 def thread_preset_names() -> tuple[str, ...]:

@@ -34,15 +34,6 @@ def build_main_window_actions(
         return action
 
     file_menu = window.menuBar().addMenu("&File")
-    save_action = make_action(
-        "save_project",
-        "Save",
-        lambda: viewer_widget._show_pending_command("Save"),
-        None,
-        "Project save is not available.",
-    )
-    save_action.setVisible(False)
-    save_action.setEnabled(False)
     new_project_action = make_action(
         "new_project",
         "New Project",
@@ -54,10 +45,29 @@ def build_main_window_actions(
     file_menu.addAction(new_project_action)
     file_menu.addAction(
         make_action(
+            "open_project",
+            "Open Project...",
+            viewer_widget._open_project_dialog,
+            "Ctrl+O",
+            "Open a native .cadproj project file.",
+        )
+    )
+    file_menu.addAction(
+        make_action(
+            "save_project",
+            "Save Project...",
+            viewer_widget._save_project_dialog,
+            "Ctrl+S",
+            "Save the current scene to a native .cadproj project file.",
+        )
+    )
+    file_menu.addSeparator()
+    file_menu.addAction(
+        make_action(
             "import_step",
             "Import STEP...",
             viewer_widget._import_step_dialog,
-            "Ctrl+O",
+            "Ctrl+Shift+O",
             "Import a STEP body into the scene.",
         )
     )
@@ -66,7 +76,7 @@ def build_main_window_actions(
             "export_step",
             "Export STEP...",
             viewer_widget._export_step_dialog,
-            "Ctrl+S",
+            "Ctrl+Shift+S",
             "Export the active body as STEP.",
         )
     )
@@ -258,6 +268,19 @@ def build_main_window_actions(
         axis_menu.addAction(action)
 
     sketch_menu = window.menuBar().addMenu("&Sketch")
+    sketch_menu.addAction(
+        make_action(
+            "toggle_workplane_corner_anchor",
+            "Anchor Workplane at Face Corner",
+            viewer_widget._toggle_workplane_anchor,
+            None,
+            "Anchor face-based sketches at the face's bottom-left "
+            "corner instead of its centroid, so sketch dimensions are "
+            "absolute mm from the corner.",
+            checkable=True,
+        )
+    )
+    sketch_menu.addSeparator()
     for action in (
         make_action(
             "start_sketch",
@@ -556,9 +579,16 @@ def build_main_window_actions(
         make_action(
             "mirror_body",
             "Mirror",
-            lambda: viewer_widget._show_pending_command("Mirror"),
+            viewer_widget._mirror_active_body_dialog,
             None,
-            "Mirror the active body.",
+            "Mirror the active body across an XY / YZ / XZ plane.",
+        ),
+        make_action(
+            "rib_feature",
+            "Rib",
+            viewer_widget._rib_between_selected_faces_dialog,
+            None,
+            "Add a triangular rib between two perpendicular planar faces.",
         ),
         make_action(
             "move_selection",
@@ -689,7 +719,7 @@ def build_main_window_actions(
             "Thread",
             viewer_widget._thread_on_selected_edge_dialog,
             None,
-            "Add a modeled thread from a selected circular edge.",
+            "Add a thread to a cylindrical face or circular edge.",
         ),
         make_action(
             "edit_edge_length",
@@ -739,6 +769,14 @@ def build_main_window_actions(
             viewer_widget._measure_selected_edge,
             None,
             "Measure the selected edge length.",
+        ),
+        make_action(
+            "measure_axis_distance",
+            "Axis Distance",
+            viewer_widget._measure_axis_distance,
+            None,
+            "Distance between the axes of two cylindrical features "
+            "(e.g. hole centres).",
         ),
         make_action(
             "measure_angle",

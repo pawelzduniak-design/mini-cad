@@ -394,6 +394,344 @@ def test_move_face_normal_pushes_cylinder_top_cap() -> None:
     assert bounding_box(pulled)["height"] == pytest.approx(40.0, abs=1e-3)
 
 
+def test_move_face_oblique_shear_shifts_cylinder_top_sideways() -> None:
+    """The user wants to drag a cylinder's top cap sideways and get an
+    oblique cylinder back, instead of being told 'face on curved body
+    only supports its normal axis'. move_face_oblique_shear must loft a
+    new body from the stationary bottom cap to the translated top cap,
+    keep the height, and extend the X bounds by the shear amount."""
+    require_ocp()
+
+    from cad_app.commands import (
+        move_face_oblique_shear,
+        supports_move_face_oblique_shear,
+    )
+    from cad_app.picker import Picker
+    from cad_app.sketch import extrude_profile, make_circle_profile
+    from cad_app.types import SelectionKind
+    from cad_app.workplane import Workplane
+
+    profile = make_circle_profile(Workplane.world_xy(), radius=20.0)
+    cylinder = extrude_profile(profile, 50.0)
+
+    from cad_app.commands import face_normal_vector
+
+    top_index = None
+    for index in range(
+        1, Picker.indexed_map(cylinder, SelectionKind.FACE).Extent() + 1
+    ):
+        face = Picker.indexed_map(cylinder, SelectionKind.FACE).FindKey(index)
+        if not Picker._is_planar_face(face):
+            continue
+        normal = face_normal_vector(cylinder, index)
+        if normal[2] > 0.95:
+            top_index = index
+            break
+    assert top_index is not None
+
+    assert supports_move_face_oblique_shear(cylinder, top_index)
+
+    shear_distance = 8.0
+    sheared = move_face_oblique_shear(cylinder, top_index, shear_distance, 0.0, 0.0)
+    assert_valid_shape(sheared)
+
+    # OCCT's default Bnd_Box is conservative for B-spline lateral
+    # surfaces, so use AddOptimal_s for a tight check against the
+    # actual sheared geometry.
+    from OCP.Bnd import Bnd_Box
+    from OCP.BRepBndLib import BRepBndLib
+
+    tight = Bnd_Box()
+    BRepBndLib.AddOptimal_s(sheared, tight)
+    xmin, ymin, zmin, xmax, ymax, zmax = tight.Get()
+    # Height preserved (top cap stays at z=50, bottom at z=0).
+    assert zmax - zmin == pytest.approx(50.0, abs=1e-3)
+    # Y stays at the cylinder's original radius - shear is along X only.
+    assert ymin == pytest.approx(-20.0, abs=1e-3)
+    assert ymax == pytest.approx(20.0, abs=1e-3)
+    # X bound widened by the shear distance; original was -20..+20,
+    # sheared top reaches +20 + 8 = +28.
+    assert xmin == pytest.approx(-20.0, abs=1e-3)
+    assert xmax == pytest.approx(28.0, abs=1e-3)
+
+
+def test_normal_push_on_already_sheared_cylinder_lowers_walls() -> None:
+    """User flow: shear a cylinder top sideways, then press Move along
+    the cap's normal expecting to shorten the whole oblique cylinder.
+    The pre-fix code routed that push through ``extrude_face`` (boolean
+    cut by a STRAIGHT prism), which sliced through the cap but left the
+    oblique side walls anchored at the previous height - the user saw
+    'face lowers without walls lowering'. ``is_oblique_shear_body``
+    detects the pre-existing shear so the apply path re-lofts instead,
+    moving the cap AND walls together so the body's overall height
+    actually shrinks."""
+    require_ocp()
+
+    from cad_app.commands import (
+        face_normal_vector,
+        is_oblique_shear_body,
+        move_face_oblique_shear,
+    )
+    from cad_app.picker import Picker
+    from cad_app.sketch import extrude_profile, make_circle_profile
+    from cad_app.types import SelectionKind
+    from cad_app.workplane import Workplane
+
+    profile = make_circle_profile(Workplane.world_xy(), radius=20.0)
+    cylinder = extrude_profile(profile, 50.0)
+
+    def top_index(shape):
+        for index in range(
+            1, Picker.indexed_map(shape, SelectionKind.FACE).Extent() + 1
+        ):
+            face = Picker.indexed_map(shape, SelectionKind.FACE).FindKey(index)
+            if not Picker._is_planar_face(face):
+                continue
+            if face_normal_vector(shape, index)[2] > 0.95:
+                return index
+        return None
+
+    top = top_index(cylinder)
+    assert top is not None
+    assert not is_oblique_shear_body(
+        cylinder, top
+    ), "Straight cylinder must not be classified as already-oblique"
+
+    sheared = move_face_oblique_shear(cylinder, top, 0.0, 15.0, 0.0)
+    sheared_top = top_index(sheared)
+    assert sheared_top is not None
+    assert is_oblique_shear_body(sheared, sheared_top), (
+        "Y-sheared cylinder must be detected as already-oblique so a "
+        "subsequent normal push re-lofts instead of extrude_face cutting"
+    )
+
+    nx, ny, nz = face_normal_vector(sheared, sheared_top)
+    pushed = move_face_oblique_shear(
+        sheared,
+        sheared_top,
+        nx * -25.0,
+        ny * -25.0,
+        nz * -25.0,
+    )
+    assert_valid_shape(pushed)
+
+    from OCP.Bnd import Bnd_Box
+    from OCP.BRepBndLib import BRepBndLib
+
+    tight = Bnd_Box()
+    BRepBndLib.AddOptimal_s(pushed, tight)
+    xmin, ymin, zmin, xmax, ymax, zmax = tight.Get()
+    # Whole body should be 25 mm shorter: walls dropped with the cap.
+    assert zmax - zmin == pytest.approx(25.0, abs=1e-3)
+    # The remaining body must still reach down to the original bottom
+    # cap. If walls had stayed anchored, the bottom would have moved
+    # up to z=25 (extrude_face's cut prism leaving the original cap
+    # exposed); the lofted rebuild leaves the bottom at z=0.
+    assert zmin == pytest.approx(0.0, abs=1e-3)
+    assert zmax == pytest.approx(25.0, abs=1e-3)
+
+
+def test_oblique_shear_works_on_fused_stacked_cylinder_top() -> None:
+    """User flow: cylinder, sketch a smaller circle on top, extrude to
+    fuse a stacked cap. Previously ``supports_move_face_oblique_shear``
+    required exactly two planar caps globally, so the top of the
+    stacked feature (which sees 3 planar faces - top, step annulus,
+    bottom) was rejected and the user couldn't shear it sideways.
+
+    The fix walks LOCAL topology: from the moved cap find its curved
+    lateral neighbours, then form the bottom wire from their non-cap
+    edges (skipping seam edges of periodic cylindrical surfaces).
+    Subtract the matching ruled solid out of the body and fuse the
+    sheared replacement back in, leaving the lower cylinder + step
+    untouched while tilting only the local feature.
+    """
+    require_ocp()
+
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeCylinder
+    from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt
+
+    from cad_app.commands import (
+        face_normal_vector,
+        move_face_oblique_shear,
+        supports_move_face_oblique_shear,
+    )
+    from cad_app.picker import Picker
+    from cad_app.sketch import extrude_profile, make_circle_profile
+    from cad_app.types import SelectionKind
+    from cad_app.workplane import Workplane
+
+    base = extrude_profile(make_circle_profile(Workplane.world_xy(), 20.0), 50.0)
+    axis = gp_Ax2(gp_Pnt(0.0, 0.0, 50.0), gp_Dir(0.0, 0.0, 1.0))
+    upper = BRepPrimAPI_MakeCylinder(axis, 12.0, 30.0).Shape()
+    stacked = BRepAlgoAPI_Fuse(base, upper).Shape()
+
+    from OCP.BRepGProp import BRepGProp
+    from OCP.GProp import GProp_GProps
+    from OCP.TopoDS import TopoDS
+
+    def top_face_index(shape):
+        face_map = Picker.indexed_map(shape, SelectionKind.FACE)
+        best_index, best_z = None, -1e9
+        for index in range(1, face_map.Extent() + 1):
+            face = TopoDS.Face_s(face_map.FindKey(index))
+            if not Picker._is_planar_face(face):
+                continue
+            if face_normal_vector(shape, index)[2] < 0.95:
+                continue
+            props = GProp_GProps()
+            BRepGProp.SurfaceProperties_s(face, props)
+            z = props.CentreOfMass().Z()
+            if z > best_z:
+                best_z, best_index = z, index
+        return best_index
+
+    top_index = top_face_index(stacked)
+    assert top_index is not None
+    assert supports_move_face_oblique_shear(
+        stacked, top_index
+    ), "Stacked-cylinder top must be shear-eligible via local topology walk"
+
+    sheared = move_face_oblique_shear(stacked, top_index, 5.0, 0.0, 0.0)
+    assert_valid_shape(sheared)
+
+    # The new top cap must sit at (+5, 0, 80) - the original top
+    # circle was at (0, 0, 80), and we asked for a +5 X shift on the
+    # cap only. The lower cylinder + step must stay put.
+    face_map = Picker.indexed_map(sheared, SelectionKind.FACE)
+    cap_centroids = []
+    for index in range(1, face_map.Extent() + 1):
+        face = TopoDS.Face_s(face_map.FindKey(index))
+        if not Picker._is_planar_face(face):
+            continue
+        props = GProp_GProps()
+        BRepGProp.SurfaceProperties_s(face, props)
+        c = props.CentreOfMass()
+        cap_centroids.append((c.X(), c.Y(), c.Z()))
+    cap_centroids.sort(key=lambda p: p[2])
+    # Expect bottom cap at (0,0,0), step annulus at (0,0,50), shifted
+    # top at (+5,0,80).
+    assert cap_centroids[0] == pytest.approx((0.0, 0.0, 0.0), abs=1e-3)
+    assert cap_centroids[1] == pytest.approx((0.0, 0.0, 50.0), abs=1e-3)
+    assert cap_centroids[2] == pytest.approx((5.0, 0.0, 80.0), abs=1e-3)
+
+
+def test_cylindrical_face_thread_helpers_size_to_geometry() -> None:
+    """The new face-driven thread flow needs to read diameter + length
+    from the picked cylindrical face and find a circular edge to anchor
+    the modeled thread on. Verify the helpers return values matching the
+    geometry and that an ISO preset auto-matched by diameter applies
+    cleanly over the full face length."""
+    require_ocp()
+
+    from cad_app.commands import (
+        apply_thread_to_edge,
+        cylindrical_face_anchor_edge_index,
+        cylindrical_face_parameters,
+    )
+    from cad_app.picker import Picker
+    from cad_app.scene import Scene
+    from cad_app.sketch import extrude_profile, make_circle_profile
+    from cad_app.thread_specs import (
+        matching_thread_preset_for_edge_diameter,
+        thread_parameters_from_preset,
+    )
+    from cad_app.types import SelectionKind
+    from cad_app.workplane import Workplane
+
+    cylinder = extrude_profile(
+        make_circle_profile(Workplane.world_xy(), radius=5.0),
+        30.0,
+    )
+
+    from OCP.BRepAdaptor import BRepAdaptor_Surface
+    from OCP.GeomAbs import GeomAbs_Cylinder
+    from OCP.TopoDS import TopoDS
+
+    face_map = Picker.indexed_map(cylinder, SelectionKind.FACE)
+    cyl_face_index = None
+    for index in range(1, face_map.Extent() + 1):
+        face = TopoDS.Face_s(face_map.FindKey(index))
+        if BRepAdaptor_Surface(face).GetType() == GeomAbs_Cylinder:
+            cyl_face_index = index
+            break
+    assert cyl_face_index is not None
+
+    _center, _axis, radius, length = cylindrical_face_parameters(
+        cylinder, cyl_face_index
+    )
+    assert radius == pytest.approx(5.0, abs=1e-6)
+    assert length == pytest.approx(30.0, abs=1e-6)
+
+    preset = matching_thread_preset_for_edge_diameter(radius * 2.0)
+    assert (
+        preset is not None and "M10" in preset.name
+    ), "Diameter 10 mm should auto-pick an M10 ISO preset"
+
+    anchor = cylindrical_face_anchor_edge_index(cylinder, cyl_face_index)
+    assert anchor > 0
+
+    params = thread_parameters_from_preset(preset)
+    scene = Scene()
+    item_id = scene.add_shape(cylinder)
+    apply_thread_to_edge(
+        scene,
+        item_id,
+        anchor,
+        pitch=float(params["pitch"]),
+        length=length,
+        depth=float(params["depth"]),
+        mode="modeled",
+        thread_type="external",
+        standard=str(params["standard"]),
+        size=str(params["size"]),
+        major_diameter=float(params["major_diameter"]),
+        minor_diameter=float(params["minor_diameter"]),
+    )
+    assert_valid_shape(scene.get(item_id).shape)
+
+
+def test_thread_defaults_scale_with_diameter_to_avoid_dense_rebuilds() -> None:
+    """A custom thread on a large-diameter cylinder must not default to
+    a 1 mm pitch. Previously an ~80 mm cylinder fell out of the preset
+    table (max M16) and defaulted to pitch=1.0, producing ~80 turns
+    over an 80 mm body and a 25-second BRep rebuild. Guard the two
+    pieces that fix this:
+
+    * the preset table now covers M20..M64 so common large diameters
+      auto-match instead of dropping to Custom;
+    * the Custom fallback returns a pitch proportional to diameter
+      so the resulting thread is sweepable in a fraction of a second.
+    """
+    from cad_app.thread_specs import (
+        default_thread_pitch_for_diameter,
+        matching_thread_preset_for_edge_diameter,
+    )
+
+    # M20..M64 in the preset table => the 80 mm diameter we tripped
+    # over should auto-match (M48..M64 envelope) instead of falling to
+    # Custom with stale defaults.
+    preset_for_80 = matching_thread_preset_for_edge_diameter(80.0)
+    assert preset_for_80 is not None
+    assert preset_for_80.pitch >= 5.0, (
+        f"80 mm diameter matched {preset_for_80.name} with pitch "
+        f"{preset_for_80.pitch} mm - expected coarse pitch >= 5"
+    )
+
+    # Diameter-proportional fallback for sizes that still don't match
+    # (very large bodies). Crucially, no diameter we'd realistically
+    # thread should default to a 1.0 mm pitch on a 80 mm body.
+    pitch_80 = default_thread_pitch_for_diameter(80.0)
+    assert pitch_80 >= 5.0, (
+        f"Default pitch for 80 mm diameter was {pitch_80} mm - "
+        "would produce a punishingly dense thread"
+    )
+    # Sanity at the small end: M6 territory keeps its 1.0 mm pitch.
+    assert default_thread_pitch_for_diameter(6.0) == pytest.approx(1.0)
+    # And the proportional fallback above the table stays sensible.
+    assert default_thread_pitch_for_diameter(200.0) >= 6.0
+
+
 def test_apply_extrude_face_splits_disconnected_result_into_scene_items(
     monkeypatch,
 ) -> None:

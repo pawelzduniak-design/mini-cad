@@ -92,6 +92,96 @@ def _run_boolean(shape_a, shape_b, operation_cls, error_message: str):
     return cleanup_shape(result)
 
 
+def _shape_has_solid(shape) -> bool:
+    """True if the shape already contains at least one solid."""
+    from OCP.TopAbs import TopAbs_SOLID
+    from OCP.TopExp import TopExp_Explorer
+
+    return TopExp_Explorer(shape, TopAbs_SOLID).More()
+
+
+def solidify_open_shell(shape):
+    """Best-effort rebuild of a closed solid from an open shell.
+
+    ``remove_face`` intentionally leaves a body as an open shell (see
+    cad_app.commands.remove_face). Boolean-based features such as
+    extrude/cut then fail because they need a closed solid. This caps
+    every *planar* free-boundary loop with a new face, sews the result,
+    and builds a solid.
+
+    Returns the shape unchanged if it already has a solid. Raises
+    ``UnsupportedTopologyError`` when the opening cannot be sealed - for
+    instance when the removed face was curved (e.g. a cylinder's lateral
+    wall), which leaves a free boundary no planar cap can close and so
+    yields a degenerate, zero-volume result.
+    """
+    if _shape_has_solid(shape):
+        return shape
+
+    from OCP.BRepBuilderAPI import (
+        BRepBuilderAPI_MakeFace,
+        BRepBuilderAPI_MakeSolid,
+        BRepBuilderAPI_Sewing,
+    )
+    from OCP.ShapeAnalysis import ShapeAnalysis_FreeBounds
+    from OCP.TopAbs import TopAbs_FACE, TopAbs_SHELL, TopAbs_WIRE
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopoDS import TopoDS
+
+    def _explore(target, kind):
+        items = []
+        explorer = TopExp_Explorer(target, kind)
+        while explorer.More():
+            items.append(explorer.Current())
+            explorer.Next()
+        return items
+
+    free_bounds = ShapeAnalysis_FreeBounds(shape, 1e-6, False, False)
+    if _explore(free_bounds.GetOpenWires(), TopAbs_WIRE):
+        raise UnsupportedTopologyError(
+            "Cannot seal this body: it has an open (non-closed) boundary."
+        )
+
+    caps = []
+    for wire in _explore(free_bounds.GetClosedWires(), TopAbs_WIRE):
+        make_face = BRepBuilderAPI_MakeFace(TopoDS.Wire_s(wire), True)
+        if not make_face.IsDone():
+            raise UnsupportedTopologyError(
+                "Cannot seal this body: a removed face left a curved opening "
+                "that no flat cap can close."
+            )
+        caps.append(make_face.Face())
+
+    sewing = BRepBuilderAPI_Sewing(1e-6)
+    for face in _explore(shape, TopAbs_FACE):
+        sewing.Add(face)
+    for cap in caps:
+        sewing.Add(cap)
+    sewing.Perform()
+
+    shells = _explore(sewing.SewedShape(), TopAbs_SHELL)
+    if not shells:
+        raise UnsupportedTopologyError("Cannot seal this body into a closed shell.")
+    solid_builder = BRepBuilderAPI_MakeSolid(TopoDS.Shell_s(shells[0]))
+    if not solid_builder.IsDone():
+        raise UnsupportedTopologyError("Cannot seal this body into a solid.")
+
+    solid = cleanup_shape(solid_builder.Solid())
+    try:
+        validate_shape(solid)
+    except InvalidShapeError as exc:
+        raise UnsupportedTopologyError(
+            "Sealing this body produced invalid geometry."
+        ) from exc
+    if abs(_solid_volume(solid)) < 1e-6:
+        # Two coincident caps over the same loop (e.g. only a cylinder's
+        # lateral wall removed) sew without enclosing any volume.
+        raise UnsupportedTopologyError(
+            "Cannot seal this body: the removed face left no volume to close."
+        )
+    return solid
+
+
 def _extract_disconnected_solids(shape):
     """Return every TopoDS_Solid contained in ``shape``.
 

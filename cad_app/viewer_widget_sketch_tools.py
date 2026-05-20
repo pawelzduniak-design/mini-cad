@@ -9,7 +9,10 @@ from dataclasses import dataclass
 from cad_app.commands import CommandError
 from cad_app.sketch import (
     SKETCH_ENTITY_META_KIND,
+    _uv_from_workplane_point,
     is_closed_polyline,
+    is_sketch_object,
+    is_sketch_profile,
     make_arc_polyline_profile,
     make_point_marker_preview,
     make_polyline_preview,
@@ -25,9 +28,27 @@ from cad_app.sketch_graph import (
     segments_meta,
     three_point_rectangle_segments,
 )
+from cad_app.sketch_snapping import (
+    SnapCandidate,
+    choose_snap,
+    grid_snapped_uv,
+    nearest_point_on_segment,
+)
+from cad_app.types import SelectionKind
 from cad_app.ui_sessions import SketchSession
 
 LOGGER = logging.getLogger(__name__)
+
+# Snap target step matching the visible coordinate grid (see
+# Viewer.display_grid default step). Only consulted while the snap
+# modifier is held.
+SKETCH_GRID_SNAP_STEP = 10.0
+# Screen-space radius (logical px) within which a snap target captures
+# the cursor. Mirrors the close-loop tolerance in _closed_line_point.
+SKETCH_SNAP_PIXEL_TOLERANCE = 12.0
+# How close (mm) a body vertex must lie to the sketch plane to be a snap
+# target — keeps off-plane geometry from littering the candidate set.
+SKETCH_SNAP_PLANE_TOLERANCE = 0.5
 
 
 @dataclass
@@ -238,13 +259,18 @@ class ViewerWidgetSketchToolMixin:
             return points[0]
         return None
 
-    @staticmethod
     def _snapped_sketch_uv(
+        self,
         session: SketchSession,
         uv: tuple[float, float],
         tolerance: float = 1.5,
     ) -> tuple[float, float]:
-        candidates = [*session.points, *session.snap_points]
+        # Include endpoints of every committed open polyline so the
+        # next-tool click can snap to them. Without this, after a
+        # tool switch the polyline's endpoints are invisible to snap
+        # even though they're the natural close-the-loop targets.
+        cross_entity_snaps = self._committed_polyline_endpoint_snaps()
+        candidates = [*session.points, *session.snap_points, *cross_entity_snaps]
         if not candidates:
             return uv
         closest = min(candidates, key=lambda point: math.dist(point, uv))
@@ -270,7 +296,7 @@ class ViewerWidgetSketchToolMixin:
         second: tuple[float, float],
         tolerance: float = 1.5,
     ) -> bool:
-        return math.dist(first, second) <= tolerance
+        return math.dist(first, second) <= float(tolerance)
 
     def _arc_meta_points(
         self,
@@ -325,6 +351,376 @@ class ViewerWidgetSketchToolMixin:
             ):
                 return arc_start, arc_end, arc_bend
         return None
+
+    # Cross-entity tolerance for matching an arc to an already-committed
+    # polyline. Generous (3 mm) because the user is clicking by hand
+    # and the polyline endpoints are not in the current session's snap
+    # set after a tool switch — they only become visible snap targets
+    # again through _committed_polyline_endpoint_snaps().
+    _CROSS_ENTITY_UV_TOLERANCE = 3.0
+
+    def _try_close_existing_polyline_with_arc(
+        self,
+        session: SketchSession,
+        arc_start: tuple[float, float],
+        arc_end: tuple[float, float],
+        arc_bend: tuple[float, float],
+        radius: float,
+    ) -> bool:
+        """When the user draws line→line→…→arc, the line points get
+        drained to a stand-alone ``line_segments`` entity on tool
+        switch. If the arc that follows then connects that polyline's
+        endpoints (start↔end, either orientation), merge them into a
+        single closed ``arc_polyline`` profile and delete the source
+        polyline entity. Returns True when a merge was performed.
+        """
+        candidate = self._find_polyline_entity_closing_arc(arc_start, arc_end)
+        if candidate is None:
+            return False
+        item_id, points_uv, reversed_chain = candidate
+        # ``make_arc_polyline_profile`` checks endpoint equality with a
+        # tight tolerance (~1e-7). The hand-clicked arc end is rarely
+        # within that of the polyline end, so we snap-align the
+        # polyline's first/last point to the arc endpoints before
+        # building the wire. The interior points stay where the user
+        # drew them.
+        snapped_points = list(points_uv)
+        if reversed_chain:
+            snapped_points[0] = arc_end
+            snapped_points[-1] = arc_start
+        else:
+            snapped_points[0] = arc_start
+            snapped_points[-1] = arc_end
+        try:
+            profile = make_arc_polyline_profile(
+                session.workplane,
+                arc_start,
+                arc_end,
+                arc_bend,
+                snapped_points,
+            )
+        except (CommandError, ValueError) as exc:
+            LOGGER.warning(
+                "Arc + existing polyline close failed: %s", exc, exc_info=True
+            )
+            return False
+        # Replace the open polyline entity with the closed profile.
+        try:
+            self._scene.remove(item_id)
+        except KeyError:
+            LOGGER.debug("Arc-close: source polyline %s already gone", item_id)
+        graph_meta = {
+            **segments_meta(polyline_segments(snapped_points)),
+            **curves_meta((arc_curve(arc_start, arc_end, arc_bend),)),
+        }
+        new_id = self._add_sketch_profile(
+            profile,
+            {
+                **self._sketch_profile_meta(
+                    profile="arc_polyline",
+                    segments=max(len(snapped_points) - 1, 1),
+                    radius=radius,
+                    workplane=session.label,
+                ),
+                **graph_meta,
+            },
+        )
+        LOGGER.info(
+            "Arc closed existing polyline into sketch profile "
+            "new_id=%s consumed_polyline=%s",
+            new_id,
+            item_id,
+        )
+        return True
+
+    def _find_polyline_entity_closing_arc(
+        self,
+        arc_start: tuple[float, float],
+        arc_end: tuple[float, float],
+    ) -> tuple[str, list[tuple[float, float]], bool] | None:
+        """Find an open polyline sketch_entity whose endpoints match
+        the given arc endpoints (either orientation). Returns
+        ``(item_id, points_uv, reversed_chain)`` where
+        ``reversed_chain`` is True when the polyline's first point
+        matches the arc's END rather than its start.
+
+        Uses the generous cross-entity tolerance because the polyline
+        endpoints aren't in the active session's snap set after a tool
+        switch — the user can't easily click within 1.5 mm of them.
+        """
+        tol = self._CROSS_ENTITY_UV_TOLERANCE
+        for item in self._scene:
+            if item.meta.get("kind") != SKETCH_ENTITY_META_KIND:
+                continue
+            if item.meta.get("profile") != "line_segments":
+                continue
+            raw_points = item.meta.get("points_uv")
+            if not isinstance(raw_points, (list, tuple)) or len(raw_points) < 2:
+                continue
+            points_uv = [(float(point[0]), float(point[1])) for point in raw_points]
+            first = points_uv[0]
+            last = points_uv[-1]
+            if self._uv_matches(first, arc_start, tolerance=tol) and self._uv_matches(
+                last, arc_end, tolerance=tol
+            ):
+                return item.item_id, points_uv, False
+            if self._uv_matches(first, arc_end, tolerance=tol) and self._uv_matches(
+                last, arc_start, tolerance=tol
+            ):
+                return item.item_id, points_uv, True
+        return None
+
+    def _committed_polyline_endpoint_snaps(self) -> list[tuple[float, float]]:
+        """Return UV endpoints of every committed open polyline so the
+        active arc / line tool can snap to them. Without this the user
+        can never close a polyline that was drained on tool switch —
+        the session's snap set is reset and the endpoints are lost."""
+        snaps: list[tuple[float, float]] = []
+        for item in self._scene:
+            if item.meta.get("kind") != SKETCH_ENTITY_META_KIND:
+                continue
+            if item.meta.get("profile") != "line_segments":
+                continue
+            raw_points = item.meta.get("points_uv")
+            if not isinstance(raw_points, (list, tuple)) or len(raw_points) < 2:
+                continue
+            snaps.append((float(raw_points[0][0]), float(raw_points[0][1])))
+            snaps.append((float(raw_points[-1][0]), float(raw_points[-1][1])))
+        return snaps
+
+    # ------------------------------------------------------------------
+    # Geometric snapping (grid + host face + other bodies + sketch points)
+    # ------------------------------------------------------------------
+
+    def _resolve_sketch_snap(
+        self,
+        session: SketchSession,
+        cursor_uv: tuple[float, float],
+        x: int,
+        y: int,
+        *,
+        include_grid: bool,
+    ) -> SnapCandidate | None:
+        """Pick the best snap target near the cursor, or None.
+
+        ``x``/``y`` are widget-logical pixels (same space the mouse
+        handlers use); selection happens in screen space so the feel is
+        zoom-independent. Any OCCT hiccup degrades gracefully to "no
+        snap" so drawing never breaks.
+        """
+        if session is None or not self._viewer.is_initialized:
+            return None
+        try:
+            candidates = self._sketch_snap_candidates(
+                session, cursor_uv, include_grid=include_grid
+            )
+        except Exception:  # pragma: no cover - defensive against OCCT
+            LOGGER.debug("Sketch snap candidate gathering failed", exc_info=True)
+            return None
+        if not candidates:
+            return None
+        return choose_snap(
+            candidates,
+            lambda uv: self._to_screen_uv(session.workplane, uv),
+            (float(x), float(y)),
+            pixel_tolerance=SKETCH_SNAP_PIXEL_TOLERANCE,
+        )
+
+    def _sketch_snap_candidates(
+        self,
+        session: SketchSession,
+        cursor_uv: tuple[float, float],
+        *,
+        include_grid: bool,
+    ) -> list[SnapCandidate]:
+        candidates: list[SnapCandidate] = []
+        candidates.extend(self._existing_entity_snap_candidates(session))
+        candidates.extend(self._host_face_snap_candidates(session, cursor_uv))
+        candidates.extend(self._other_body_snap_candidates(session))
+        if include_grid:
+            candidates.append(
+                SnapCandidate(
+                    uv=grid_snapped_uv(cursor_uv, SKETCH_GRID_SNAP_STEP),
+                    kind="grid",
+                )
+            )
+        return candidates
+
+    def _existing_entity_snap_candidates(
+        self, session: SketchSession
+    ) -> list[SnapCandidate]:
+        points = [
+            *session.points,
+            *session.snap_points,
+            *self._committed_polyline_endpoint_snaps(),
+        ]
+        return [
+            SnapCandidate(uv=(float(u), float(v)), kind="endpoint") for u, v in points
+        ]
+
+    def _host_face(self, session: SketchSession):
+        """Return ``(item_id, face_index, TopoDS_Face)`` for the body face
+        the sketch sits on, or None for a base-plane sketch."""
+        host = getattr(self, "_active_workplane_host", None) or session.host
+        if not host:
+            return None
+        item_id, face_index = host
+        if item_id not in self._scene:
+            return None
+        try:
+            from OCP.TopoDS import TopoDS
+
+            face = TopoDS.Face_s(
+                self._picker.subshape(item_id, SelectionKind.FACE, face_index)
+            )
+        except (CommandError, IndexError, ValueError, RuntimeError):
+            return None
+        return item_id, face_index, face
+
+    def _host_face_snap_candidates(
+        self,
+        session: SketchSession,
+        cursor_uv: tuple[float, float],
+    ) -> list[SnapCandidate]:
+        resolved = self._host_face(session)
+        if resolved is None:
+            return []
+        _item_id, _face_index, face = resolved
+        from OCP.BRep import BRep_Tool
+        from OCP.BRepAdaptor import BRepAdaptor_Curve
+        from OCP.TopAbs import TopAbs_EDGE, TopAbs_VERTEX
+        from OCP.TopExp import TopExp
+        from OCP.TopoDS import TopoDS
+        from OCP.TopTools import TopTools_IndexedMapOfShape
+
+        workplane = session.workplane
+        out: list[SnapCandidate] = []
+
+        vmap = TopTools_IndexedMapOfShape()
+        TopExp.MapShapes_s(face, TopAbs_VERTEX, vmap)
+        for index in range(1, vmap.Extent() + 1):
+            point = BRep_Tool.Pnt_s(TopoDS.Vertex_s(vmap.FindKey(index)))
+            out.append(
+                SnapCandidate(
+                    uv=_uv_from_workplane_point(workplane, point), kind="endpoint"
+                )
+            )
+
+        emap = TopTools_IndexedMapOfShape()
+        TopExp.MapShapes_s(face, TopAbs_EDGE, emap)
+        for index in range(1, emap.Extent() + 1):
+            edge = TopoDS.Edge_s(emap.FindKey(index))
+            try:
+                curve = BRepAdaptor_Curve(edge)
+                first = curve.FirstParameter()
+                last = curve.LastParameter()
+                p_start = curve.Value(first)
+                p_end = curve.Value(last)
+                p_mid = curve.Value((first + last) * 0.5)
+            except (RuntimeError, ValueError):
+                continue
+            uv_start = _uv_from_workplane_point(workplane, p_start)
+            uv_end = _uv_from_workplane_point(workplane, p_end)
+            # True curve midpoint (works for arcs); on-edge uses the chord
+            # as a cheap approximation that's exact for straight edges.
+            out.append(
+                SnapCandidate(
+                    uv=_uv_from_workplane_point(workplane, p_mid), kind="midpoint"
+                )
+            )
+            out.append(
+                SnapCandidate(
+                    uv=nearest_point_on_segment(uv_start, uv_end, cursor_uv),
+                    kind="on_edge",
+                )
+            )
+        return out
+
+    def _other_body_snap_candidates(
+        self, session: SketchSession
+    ) -> list[SnapCandidate]:
+        from OCP.BRep import BRep_Tool
+        from OCP.TopAbs import TopAbs_VERTEX
+        from OCP.TopExp import TopExp
+        from OCP.TopoDS import TopoDS
+        from OCP.TopTools import TopTools_IndexedMapOfShape
+
+        host = getattr(self, "_active_workplane_host", None) or session.host
+        host_item = host[0] if host else None
+        workplane = session.workplane
+        normal = (
+            workplane.normal.X(),
+            workplane.normal.Y(),
+            workplane.normal.Z(),
+        )
+        origin = (
+            workplane.origin.X(),
+            workplane.origin.Y(),
+            workplane.origin.Z(),
+        )
+        out: list[SnapCandidate] = []
+        for scene_object in self._scene:
+            if scene_object.item_id == host_item:
+                continue
+            if is_sketch_object(scene_object.meta) or is_sketch_profile(
+                scene_object.meta
+            ):
+                continue
+            try:
+                vmap = TopTools_IndexedMapOfShape()
+                TopExp.MapShapes_s(scene_object.shape, TopAbs_VERTEX, vmap)
+            except (RuntimeError, ValueError):
+                continue
+            for index in range(1, vmap.Extent() + 1):
+                point = BRep_Tool.Pnt_s(TopoDS.Vertex_s(vmap.FindKey(index)))
+                relative = (
+                    point.X() - origin[0],
+                    point.Y() - origin[1],
+                    point.Z() - origin[2],
+                )
+                plane_distance = abs(
+                    relative[0] * normal[0]
+                    + relative[1] * normal[1]
+                    + relative[2] * normal[2]
+                )
+                if plane_distance > SKETCH_SNAP_PLANE_TOLERANCE:
+                    continue
+                out.append(
+                    SnapCandidate(
+                        uv=_uv_from_workplane_point(workplane, point),
+                        kind="endpoint",
+                    )
+                )
+        return out
+
+    def _to_screen_uv(
+        self,
+        workplane,
+        uv: tuple[float, float],
+    ) -> tuple[float, float] | None:
+        """Project a workplane UV point to widget-logical pixels."""
+        if not self._viewer.is_initialized:
+            return None
+        world = self._workplane_point(workplane, uv)
+        try:
+            view_x, view_y = self._viewer.view.Convert(world[0], world[1], world[2])
+        except (RuntimeError, ValueError, TypeError):
+            return None
+        scale = self.devicePixelRatioF() or 1.0
+        return (float(view_x) / scale, float(view_y) / scale)
+
+    def _update_sketch_snap_indicator(self, session: SketchSession) -> None:
+        """Show/clear the snap marker for the snap recorded on the session."""
+        snap = getattr(session, "last_snap", None)
+        if snap is None or not self._viewer.is_initialized:
+            self._viewer.clear_sketch_snap_marker()
+            return
+        marker = make_point_marker_preview(session.workplane, snap.uv, size=3.5)
+        self._viewer.display_sketch_snap_marker(
+            marker,
+            self._workplane_normal_tuple(session.workplane),
+        )
+        self._show_status(f"Snap: {snap.label}")
 
     def _try_commit_arc_line_profile(self, session: SketchSession) -> bool:
         arc_points = self._matching_arc_for_line_chain(session)
@@ -459,22 +855,42 @@ class ViewerWidgetSketchToolMixin:
             self._hide_dimension_overlay()
             self._show_status("Arc failed")
             return
+        arc_start = session.points[0]
+        arc_end = session.points[1]
+        arc_bend = session.points[2]
+        # If this arc's endpoints close an already-committed open
+        # polyline (the user drew lines, switched to arc, then arced
+        # back to the start), merge both into one closed arc-line
+        # profile instead of leaving them as two disconnected entities.
+        if self._try_close_existing_polyline_with_arc(
+            session, arc_start, arc_end, arc_bend, radius
+        ):
+            session.points.clear()
+            self._viewer.clear_preview_marker()
+            session.drag_dimensions = f"Arc R {radius :.1f}"
+            self._show_dimension_overlay(f"Arc R: {radius :.2f} mm", x, y)
+            self._set_context_hint(
+                "Closed sketch profile from line chain + closing arc"
+            )
+            self._show_status("Arc closed line chain into a sketch profile")
+            self._refresh_hud()
+            return
         item_id = self._add_sketch_entity(
             edge,
             self._sketch_profile_meta(
                 profile="arc",
                 radius=radius,
-                start_u=session.points[0][0],
-                start_v=session.points[0][1],
-                end_u=session.points[1][0],
-                end_v=session.points[1][1],
-                bend_u=session.points[2][0],
-                bend_v=session.points[2][1],
+                start_u=arc_start[0],
+                start_v=arc_start[1],
+                end_u=arc_end[0],
+                end_v=arc_end[1],
+                bend_u=arc_bend[0],
+                bend_v=arc_bend[1],
                 workplane=session.label,
             ),
         )
-        self._remember_sketch_snap_point(session, session.points[0])
-        self._remember_sketch_snap_point(session, session.points[1])
+        self._remember_sketch_snap_point(session, arc_start)
+        self._remember_sketch_snap_point(session, arc_end)
         session.points.clear()
         # Drop the in-progress preview line/arc marker now that the
         # entity is committed — otherwise it lingers on top of the new

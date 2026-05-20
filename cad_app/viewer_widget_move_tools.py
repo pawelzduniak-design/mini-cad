@@ -525,21 +525,35 @@ class ViewerWidgetMoveToolsMixin:
         axis: tuple[float, float, float],
     ) -> bool:
         """Return whether changing a face-move session to ``axis`` will
-        actually commit. On bodies with curved faces (cylinder, fillet
-        torus) move_face_controlled cannot rebuild the shell, so the
-        only axis the apply path can honour is the one parallel to the
-        face's own normal - that goes through extrude_face instead.
-        Blocking the manipulator switch early stops the user from
-        seeing a phantom preview followed by 'Move tool failed'.
+        actually commit. Three apply paths cover the FACE-move target:
+
+        * Normal push-pull via ``extrude_face`` - works on any planar
+          face, including caps of curved-side bodies (cylinder,
+          frustum).
+        * Vertex-rebuild via ``move_face_controlled`` - all-planar
+          bodies (box, prism).
+        * Oblique shear via ``move_face_oblique_shear`` - cap on a body
+          with curved lateral surfaces; lofts new sides between the
+          stationary cap wire and the translated moved-cap wire.
+
+        Reject the manipulator switch only when none of these can
+        handle the chosen axis on this body, so the user gets a clear
+        status instead of a phantom preview followed by 'Move tool
+        failed'.
         """
         if session.target_kind != SelectionKind.FACE:
             return True
         try:
-            from cad_app.commands import supports_move_face_controlled
+            from cad_app.commands import (
+                supports_move_face_controlled,
+                supports_move_face_oblique_shear,
+            )
         except ModuleNotFoundError:
             return True
         scene_object = self._scene.get(session.item_id)
         if supports_move_face_controlled(scene_object.shape, session.index):
+            return True
+        if supports_move_face_oblique_shear(scene_object.shape, session.index):
             return True
         try:
             nx, ny, nz = self._face_normal(session.item_id, session.index)

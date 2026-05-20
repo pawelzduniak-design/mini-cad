@@ -34,3 +34,4 @@ The current source of truth is this documentation set:
 3. Add or update the smallest contract test for the behavior.
 4. Run the narrow test group, then `.\run.ps1 check`.
 5. Run `.\run.ps1 visual` for any viewport, rendering, GUI, or mode work.
+   Linux support is work in progress and is not a documented release target yet.

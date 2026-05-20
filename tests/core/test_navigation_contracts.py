@@ -39,3 +39,19 @@ def test_navigation_casts_qt_float_positions_before_native_view_calls() -> None:
         ("rotate", 473, 552),
         ("pan", 8, 7),
     ]
+
+
+def test_orbit_by_drives_trackball_from_centre_with_int_coords() -> None:
+    from cad_app.navigation import NavigationController
+
+    view = _StrictIntView()
+    navigation = NavigationController()
+    navigation.attach_view(view)
+
+    # Centre at (400.0, 300.0), drag 48px to the right.
+    navigation.orbit_by(400.0, 300.0, 48.0, 0.0)
+
+    assert view.calls == [
+        ("start", 400, 300),
+        ("rotate", 448, 300),
+    ]

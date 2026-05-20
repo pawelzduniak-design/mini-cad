@@ -28,3 +28,5 @@ Thumbs.db
 /blad.png
 /*_screenshot.png
 /screenshot_*.png
+# Local CAD projects created while experimenting
+/*.cadproj

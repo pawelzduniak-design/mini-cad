@@ -30,6 +30,7 @@ from cad_app.command_geometry import (
     _move_vertices_via_face_rebuild,
     _planar_face_normal,
     _run_boolean,
+    _shape_has_solid,
     _solid_volume,
     _try_rebased_fillet,
     _updated_fillet_history,
@@ -37,6 +38,7 @@ from cad_app.command_geometry import (
     _vertex_by_index,
     _workplane_from_face,
     edge_supports_direct_round,
+    solidify_open_shell,
     top_planar_face_index,
 )
 from cad_app.feature_history import (
@@ -63,10 +65,13 @@ __all__ = [
     "apply_circle_feature",
     "apply_extrude_face",
     "apply_fillet_edge",
+    "apply_mirror_body",
     "apply_move_edge_controlled",
     "apply_move_face_controlled",
     "apply_move_face_normal",
+    "apply_move_face_oblique_shear",
     "apply_move_object",
+    "apply_rib_between_faces",
     "apply_thread_to_edge",
     "apply_move_vertex_controlled",
     "apply_remove_face",
@@ -74,21 +79,30 @@ __all__ = [
     "boolean_bodies",
     "chamfer_edge",
     "cleanup_shape",
+    "cylinder_axis_world_line",
     "edge_supports_direct_round",
     "extrude_face",
     "face_normal_vector",
     "fillet_edge",
     "fillet_edges",
+    "circle_axis_world_line",
     "circular_edge_parameters",
+    "cylindrical_face_anchor_edge_index",
+    "cylindrical_face_parameters",
+    "distance_between_axes",
+    "is_oblique_shear_body",
+    "mirror_shape",
     "move_edge_controlled",
     "move_face_controlled",
     "move_face_normal",
+    "move_face_oblique_shear",
     "move_shape",
     "move_vertex_controlled",
     "rotate_shape",
     "rotated_shape",
     "supports_move_edge_controlled",
     "supports_move_face_controlled",
+    "supports_move_face_oblique_shear",
     "thread_default_length",
     "thread_edge",
     "supports_move_vertex_controlled",
@@ -125,9 +139,16 @@ def extrude_face(
     prism = prism_builder.Shape()
     validate_shape(prism)
 
+    # A body left open by Remove Face is a shell, not a solid, so the
+    # boolean below would fail. Seal it back into a solid first; the
+    # picked face is preserved through sealing, so the prism still lands
+    # on it. Raises a clear UnsupportedTopologyError when the opening
+    # cannot be capped (e.g. a removed curved wall).
+    target = shape if _shape_has_solid(shape) else solidify_open_shell(shape)
+
     operation_cls = BRepAlgoAPI_Fuse if distance > 0 else BRepAlgoAPI_Cut
     return _run_boolean(
-        shape, prism, operation_cls, "Extrude boolean operation failed."
+        target, prism, operation_cls, "Extrude boolean operation failed."
     )
 
 
@@ -186,6 +207,12 @@ def apply_extrude_face(
     step = capture_extrude_face_step(scene_object.shape, face_index, distance)
     result = extrude_face(scene_object.shape, face_index, distance)
     new_meta = append_feature_step(scene_object.meta, scene_object.shape, step)
+    # If the body was an open shell (Remove Face) and extrude resealed it,
+    # it is a closed solid again - drop the stale open-shell tag.
+    if new_meta.get("open_shell") and _shape_has_solid(result):
+        new_meta = {
+            key: value for key, value in new_meta.items() if key != "open_shell"
+        }
     return _replace_shape_splitting_disconnected(
         scene,
         item_id,
@@ -276,6 +303,110 @@ def circular_edge_parameters(
         _unit_vector((direction.X(), direction.Y(), direction.Z())),
         radius,
     )
+
+
+def cylindrical_face_parameters(
+    shape: TopoDS_Shape,
+    face_index: int,
+) -> tuple[
+    tuple[float, float, float],
+    tuple[float, float, float],
+    float,
+    float,
+]:
+    """Return (axis_anchor, axis_direction, radius, length) for a cylindrical
+    face. ``axis_anchor`` is the midpoint of the face along the axis, so it
+    sits inside the body and can be used as the thread centre.
+
+    Raises ``UnsupportedTopologyError`` if the selected face isn't a
+    cylinder. The face's length along the axis is read from the
+    parametric V range (``[vmin, vmax] * radius`` is wrong - the V range
+    on an OCCT cylinder is already in axial units), which works whether
+    the face is the full body lateral or a trimmed segment.
+    """
+    validate_shape(shape)
+    face = _face_by_index(shape, face_index)
+
+    from OCP.BRepAdaptor import BRepAdaptor_Surface
+    from OCP.GeomAbs import GeomAbs_Cylinder
+
+    surface = BRepAdaptor_Surface(face)
+    if surface.GetType() != GeomAbs_Cylinder:
+        raise UnsupportedTopologyError("Thread on face requires a cylindrical face.")
+    cylinder = surface.Cylinder()
+    radius = float(cylinder.Radius())
+    if radius <= 1e-7:
+        raise UnsupportedTopologyError("Cylindrical face radius is too small.")
+    axis_dir = cylinder.Axis().Direction()
+    direction = _unit_vector((axis_dir.X(), axis_dir.Y(), axis_dir.Z()))
+    location = cylinder.Axis().Location()
+
+    # OCCT cylindrical surfaces parametrise V along the axis (in mm) and
+    # U around the circumference (in radians). FirstVParameter /
+    # LastVParameter give the axial extent of the trimmed face.
+    vmin = float(surface.FirstVParameter())
+    vmax = float(surface.LastVParameter())
+    length = max(0.0, vmax - vmin)
+    if length <= 1e-7:
+        raise UnsupportedTopologyError(
+            "Cylindrical face has zero length along its axis."
+        )
+    midv = 0.5 * (vmin + vmax)
+    center = (
+        location.X() + midv * direction[0],
+        location.Y() + midv * direction[1],
+        location.Z() + midv * direction[2],
+    )
+    return center, direction, radius, length
+
+
+def cylindrical_face_anchor_edge_index(
+    shape: TopoDS_Shape,
+    face_index: int,
+) -> int:
+    """Return the index of one of the cylindrical face's circular end
+    edges. Threads are built relative to a circular edge, so when the
+    user picks the cylindrical FACE we still need an anchor edge for
+    ``apply_thread_to_edge``. Returns the lower-along-axis circle so
+    external threads start at the base and run upward.
+    """
+    validate_shape(shape)
+    face = _face_by_index(shape, face_index)
+    _center, axis, _radius, _length = cylindrical_face_parameters(shape, face_index)
+
+    from OCP.BRepAdaptor import BRepAdaptor_Curve
+    from OCP.GeomAbs import GeomAbs_Circle
+    from OCP.TopAbs import TopAbs_EDGE
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopoDS import TopoDS
+
+    edge_map = Picker.indexed_map(shape, SelectionKind.EDGE)
+    best_index: int | None = None
+    best_projection = float("inf")
+    explorer = TopExp_Explorer(face, TopAbs_EDGE)
+    while explorer.More():
+        edge = TopoDS.Edge_s(explorer.Current())
+        curve = BRepAdaptor_Curve(edge)
+        if curve.GetType() == GeomAbs_Circle:
+            index = edge_map.FindIndex(edge)
+            if index > 0:
+                # Mid-arc point on the circle, projected onto the axis -
+                # the lower one (most negative projection) is the base.
+                point = curve.Value(
+                    0.5 * (curve.FirstParameter() + curve.LastParameter())
+                )
+                projection = (
+                    point.X() * axis[0] + point.Y() * axis[1] + point.Z() * axis[2]
+                )
+                if projection < best_projection:
+                    best_projection = projection
+                    best_index = index
+        explorer.Next()
+    if best_index is None:
+        raise UnsupportedTopologyError(
+            "Cylindrical face has no circular edge to anchor the thread."
+        )
+    return best_index
 
 
 def thread_default_length(
@@ -984,7 +1115,7 @@ def move_face_controlled(
     _validate_move_vector(dx, dy, dz)
     validate_shape(shape)
     face = _face_by_index(shape, face_index)
-    _assert_all_faces_planar(shape)
+    _assert_all_faces_planar(shape, context="Sideways face move")
     moved_vertex_indexes = _face_vertex_indexes(shape, face)
     return _move_vertices_via_face_rebuild(
         shape,
@@ -1061,11 +1192,351 @@ def supports_move_face_controlled(shape: TopoDS_Shape, face_index: int) -> bool:
     try:
         validate_shape(shape)
         face = _face_by_index(shape, face_index)
-        _assert_all_faces_planar(shape)
+        _assert_all_faces_planar(shape, context="Sideways face move")
         _face_vertex_indexes(shape, face)
     except (CommandError, IndexError, TypeError, AttributeError):
         return False
     return True
+
+
+def _is_planar_face(face) -> bool:
+    from cad_app.command_topology import _is_planar_face as _impl
+
+    return _impl(face)
+
+
+def _face_outer_wire(face):
+    from OCP.BRepTools import BRepTools
+
+    return BRepTools.OuterWire_s(face)
+
+
+def _translated_wire(wire, dx: float, dy: float, dz: float):
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
+    from OCP.gp import gp_Trsf, gp_Vec
+    from OCP.TopoDS import TopoDS
+
+    transform = gp_Trsf()
+    transform.SetTranslation(gp_Vec(dx, dy, dz))
+    return TopoDS.Wire_s(BRepBuilderAPI_Transform(wire, transform, True).Shape())
+
+
+def _local_shear_context(shape: TopoDS_Shape, face_index: int):
+    """Walk the topology around ``face_index`` and identify the local
+    feature it caps. Returns a dict with the moved face, its outer wire,
+    the set of curved lateral faces immediately adjacent to that wire,
+    and the wire formed by the OTHER-end edges of those laterals.
+
+    Returns ``None`` if the topology doesn't match a closed cap → curved
+    lateral → bottom-wire pattern - e.g. a prism (planar neighbours), a
+    sphere (no curved-lateral loop), or a body where the laterals don't
+    close back into a single wire on the other side.
+
+    This is the basis for both ``supports_move_face_oblique_shear`` and
+    the apply path. Using LOCAL topology (just the moved face and its
+    immediate lateral chain) lets the shear work on stacked cylinders /
+    fused features where there are more than two planar faces globally
+    but the moved cap still tops a single curved-lateral feature.
+    """
+    try:
+        validate_shape(shape)
+        moved_face = _face_by_index(shape, face_index)
+        if not _is_planar_face(moved_face):
+            return None
+
+        from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeWire
+        from OCP.TopAbs import TopAbs_EDGE, TopAbs_WIRE
+        from OCP.TopExp import TopExp, TopExp_Explorer
+        from OCP.TopoDS import TopoDS
+        from OCP.TopTools import TopTools_IndexedMapOfShape
+
+        # The moved cap must be a single-loop face. A cap with an
+        # internal wire (an annulus) would need each loop paired with a
+        # matching loop on the bottom; punt on that until needed.
+        wire_explorer = TopExp_Explorer(moved_face, TopAbs_WIRE)
+        wire_count = 0
+        while wire_explorer.More():
+            wire_count += 1
+            if wire_count > 1:
+                return None
+            wire_explorer.Next()
+        if wire_count != 1:
+            return None
+
+        top_wire = _face_outer_wire(moved_face)
+        top_edges = TopTools_IndexedMapOfShape()
+        TopExp.MapShapes_s(top_wire, TopAbs_EDGE, top_edges)
+        if top_edges.Extent() == 0:
+            return None
+
+        face_map = Picker.indexed_map(shape, SelectionKind.FACE)
+        lateral_faces = []
+        lateral_seen: set[int] = set()
+        for fi in range(1, face_map.Extent() + 1):
+            if fi == face_index:
+                continue
+            face = TopoDS.Face_s(face_map.FindKey(fi))
+            face_edges = TopTools_IndexedMapOfShape()
+            TopExp.MapShapes_s(face, TopAbs_EDGE, face_edges)
+            shares_edge = False
+            for ei in range(1, top_edges.Extent() + 1):
+                if face_edges.Contains(top_edges.FindKey(ei)):
+                    shares_edge = True
+                    break
+            if shares_edge:
+                if fi not in lateral_seen:
+                    lateral_seen.add(fi)
+                    lateral_faces.append(face)
+        if not lateral_faces:
+            return None
+
+        # A planar neighbour means the moved face borders another flat
+        # face directly (prism scenario). ``move_face_controlled``
+        # handles those; leaving them out keeps the shear path's
+        # responsibility narrow.
+        for lateral in lateral_faces:
+            if _is_planar_face(lateral):
+                return None
+
+        # Collect the OTHER-end edges of the laterals - everything they
+        # bound that isn't already on the moved cap. SKIP seam edges of
+        # periodic cylindrical surfaces: those only border the lateral
+        # face itself (no other face shares them), so they're internal
+        # parametric markers, not real geometric boundaries. Including
+        # the seam pollutes the bottom wire (it picks up the vertical
+        # ruling alongside the bottom circle) and breaks the loft.
+        def _edge_is_seam(edge, owning_lateral):
+            # Real boundary edges are shared between the lateral and
+            # SOME other face in the shape (the moved cap, the step
+            # annulus, the bottom cap). Seam edges of a closed periodic
+            # surface appear only on the lateral itself - test by
+            # checking every other face of the body for the edge.
+            for fi in range(1, face_map.Extent() + 1):
+                other = TopoDS.Face_s(face_map.FindKey(fi))
+                if other.IsSame(owning_lateral):
+                    continue
+                other_edges = TopTools_IndexedMapOfShape()
+                TopExp.MapShapes_s(other, TopAbs_EDGE, other_edges)
+                if other_edges.Contains(edge):
+                    return False
+            return True
+
+        bottom_edges = TopTools_IndexedMapOfShape()
+        for lateral in lateral_faces:
+            edges = TopTools_IndexedMapOfShape()
+            TopExp.MapShapes_s(lateral, TopAbs_EDGE, edges)
+            for ei in range(1, edges.Extent() + 1):
+                edge = edges.FindKey(ei)
+                if top_edges.Contains(edge):
+                    continue
+                if _edge_is_seam(edge, lateral):
+                    continue
+                bottom_edges.Add(edge)
+        if bottom_edges.Extent() == 0:
+            return None
+
+        wire_builder = BRepBuilderAPI_MakeWire()
+        for ei in range(1, bottom_edges.Extent() + 1):
+            edge = TopoDS.Edge_s(bottom_edges.FindKey(ei))
+            wire_builder.Add(edge)
+        if not wire_builder.IsDone():
+            return None
+        bottom_wire = wire_builder.Wire()
+        if not bottom_wire.Closed():
+            return None
+
+        return {
+            "moved_face": moved_face,
+            "lateral_faces": lateral_faces,
+            "top_wire": top_wire,
+            "bottom_wire": bottom_wire,
+        }
+    except (CommandError, IndexError, TypeError, AttributeError):
+        return None
+
+
+def supports_move_face_oblique_shear(
+    shape: TopoDS_Shape,
+    face_index: int,
+) -> bool:
+    """True when ``face_index`` caps a single curved-lateral feature on
+    the body. Covers a free-standing cylinder / frustum AND the cap of a
+    fused feature on top of another body (sketch + extrude on a
+    cylinder), as long as the laterals close back into one wire on the
+    bottom of the feature.
+
+    Excludes all-planar bodies (prism / box - handled by
+    ``move_face_controlled``), spheres (no lateral chain), and tori
+    (laterals don't close into a single wire).
+    """
+    return _local_shear_context(shape, face_index) is not None
+
+
+def _face_centroid(face) -> tuple[float, float, float]:
+    from OCP.BRepGProp import BRepGProp
+    from OCP.GProp import GProp_GProps
+
+    props = GProp_GProps()
+    BRepGProp.SurfaceProperties_s(face, props)
+    point = props.CentreOfMass()
+    return point.X(), point.Y(), point.Z()
+
+
+def _wire_centroid(wire) -> tuple[float, float, float] | None:
+    from OCP.BRepGProp import BRepGProp
+    from OCP.GProp import GProp_GProps
+
+    props = GProp_GProps()
+    BRepGProp.LinearProperties_s(wire, props)
+    if props.Mass() < 1e-12:
+        return None
+    point = props.CentreOfMass()
+    return point.X(), point.Y(), point.Z()
+
+
+def is_oblique_shear_body(shape: TopoDS_Shape, face_index: int) -> bool:
+    """True when the local feature capped by ``face_index`` already
+    leans: the line from the bottom-wire centroid to the moved-face
+    centroid is NOT parallel to the moved face's normal.
+
+    Push-pull along the cap normal on such a feature cannot go through
+    ``extrude_face`` (boolean prism cut) because the existing lateral
+    surface is not the straight prism ``extrude_face`` would subtract.
+    Without this detection the user sees the cap slide along the
+    normal while the oblique walls stay anchored - "face lowers
+    without walls lowering".
+
+    Uses the local feature's bottom wire (not the body's far cap) so
+    the detection works on stacked / fused features too, not just on
+    a free-standing cylinder.
+    """
+    context = _local_shear_context(shape, face_index)
+    if context is None:
+        return False
+    try:
+        moved_normal = _planar_face_normal(context["moved_face"])
+        nx, ny, nz = moved_normal.X(), moved_normal.Y(), moved_normal.Z()
+        moved_center = _face_centroid(context["moved_face"])
+        bottom_center = _wire_centroid(context["bottom_wire"])
+        if bottom_center is None:
+            return False
+        cx = moved_center[0] - bottom_center[0]
+        cy = moved_center[1] - bottom_center[1]
+        cz = moved_center[2] - bottom_center[2]
+        connector_length_sq = cx * cx + cy * cy + cz * cz
+        if connector_length_sq < 1e-12:
+            return False
+        normal_length_sq = nx * nx + ny * ny + nz * nz
+        if normal_length_sq < 1e-12:
+            return False
+        projection = cx * nx + cy * ny + cz * nz
+        projection_sq = projection * projection / normal_length_sq
+        return connector_length_sq - projection_sq > 1e-6 * connector_length_sq
+    except (CommandError, IndexError, TypeError, AttributeError):
+        return False
+
+
+def _loft_solid_between_wires(bottom_wire, top_wire) -> TopoDS_Shape:
+    """Build a ruled solid between two wires. Used to assemble both the
+    old upper-section tool (which must match the existing topology so
+    Boolean Cut removes it cleanly) and the new sheared upper-section
+    tool (which Boolean Fuse adds back in)."""
+    from OCP.BRepOffsetAPI import BRepOffsetAPI_ThruSections
+
+    # ruled=True keeps the lateral surface as straight rulings between
+    # corresponding wire points - the existing upper cylinder is
+    # exactly such a ruled surface, so Boolean Cut subtracts it
+    # without leaving sliver faces behind.
+    loft = BRepOffsetAPI_ThruSections(True, True, 1e-6)
+    loft.AddWire(bottom_wire)
+    loft.AddWire(top_wire)
+    loft.CheckCompatibility(True)
+    loft.Build()
+    if not loft.IsDone():
+        raise OperationFailedError("Oblique face move loft failed.")
+    return loft.Shape()
+
+
+def move_face_oblique_shear(
+    shape: TopoDS_Shape,
+    face_index: int,
+    dx: float,
+    dy: float,
+    dz: float,
+) -> TopoDS_Shape:
+    """Shear a planar cap and its curved-lateral feature by translating
+    the cap's wire by (dx,dy,dz) and re-lofting the lateral surface.
+
+    Works in two regimes:
+
+    * Whole-body cap (free cylinder / frustum): the local context's
+      bottom wire is the body's opposite cap, so the rebuilt loft IS
+      the whole new body.
+    * Local feature (sketch + extrude fused on top of another body):
+      the bottom wire belongs to an internal planar face (the step
+      annulus's inner wire). Subtract the old upper-section solid out
+      of the body and fuse the new sheared upper-section back in -
+      this leaves the lower body intact while tilting only the local
+      feature the user clicked.
+    """
+    _validate_move_vector(dx, dy, dz)
+    validate_shape(shape)
+    context = _local_shear_context(shape, face_index)
+    if context is None:
+        raise UnsupportedTopologyError(
+            "Oblique face move requires a cap on a body with curved sides."
+        )
+    top_wire = context["top_wire"]
+    bottom_wire = context["bottom_wire"]
+    translated_top = _translated_wire(top_wire, dx, dy, dz)
+
+    new_upper = _loft_solid_between_wires(bottom_wire, translated_top)
+    validate_shape(new_upper)
+
+    face_map = Picker.indexed_map(shape, SelectionKind.FACE)
+    # Free-standing case: the moved cap and its bottom-wire enclose
+    # the entire body. Skip the Cut+Fuse round-trip - the loft IS the
+    # result. The face-count probe is a cheap way to recognise this
+    # (exactly two planar caps + N curved laterals); for any local
+    # feature on a larger body there will be additional faces.
+    is_free_standing = face_map.Extent() == 1 + len(context["lateral_faces"]) + 1
+    if is_free_standing:
+        return cleanup_shape(new_upper)
+
+    old_upper = _loft_solid_between_wires(bottom_wire, top_wire)
+    validate_shape(old_upper)
+
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut, BRepAlgoAPI_Fuse
+
+    base = _run_boolean(
+        shape,
+        old_upper,
+        BRepAlgoAPI_Cut,
+        "Oblique shear: removing original feature failed.",
+    )
+    fused = _run_boolean(
+        base,
+        new_upper,
+        BRepAlgoAPI_Fuse,
+        "Oblique shear: fusing sheared feature failed.",
+    )
+    validate_shape(fused)
+    return cleanup_shape(fused)
+
+
+def apply_move_face_oblique_shear(
+    scene: Scene,
+    item_id: str,
+    face_index: int,
+    dx: float,
+    dy: float,
+    dz: float,
+) -> TopoDS_Shape:
+    """Apply oblique face shear to a scene object."""
+    scene_object = scene.get(item_id)
+    result = move_face_oblique_shear(scene_object.shape, face_index, dx, dy, dz)
+    scene.replace_shape(item_id, result)
+    return result
 
 
 def move_edge_controlled(
@@ -1198,3 +1669,382 @@ def supports_move_vertex_controlled(shape: TopoDS_Shape, vertex_index: int) -> b
     except (CommandError, IndexError, TypeError, AttributeError):
         return False
     return False
+
+
+# ---------------------------------------------------------------------------
+# Mirror, hole, rib, and axis-distance helpers (Q2 features).
+# ---------------------------------------------------------------------------
+
+
+_MIRROR_PLANE_NORMALS: dict[str, tuple[float, float, float]] = {
+    "xy": (0.0, 0.0, 1.0),
+    "yz": (1.0, 0.0, 0.0),
+    "xz": (0.0, 1.0, 0.0),
+}
+
+
+def mirror_shape(
+    shape: TopoDS_Shape,
+    plane: str = "yz",
+    origin: tuple[float, float, float] = (0.0, 0.0, 0.0),
+) -> TopoDS_Shape:
+    """Reflect ``shape`` across one of the three world coordinate planes.
+
+    ``plane`` is one of ``"xy"`` / ``"yz"`` / ``"xz"`` and names the
+    mirror plane itself, not its normal. The reflection is taken about
+    ``origin`` on that plane so users can mirror about an offset plane
+    (e.g. mirror about X = -10) without first translating the body.
+    """
+    plane_normalised = plane.lower().strip()
+    if plane_normalised not in _MIRROR_PLANE_NORMALS:
+        raise ValueError(
+            f"Unsupported mirror plane: {plane!r}. Use 'xy', 'yz', or 'xz'."
+        )
+    validate_shape(shape)
+
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
+    from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt, gp_Trsf
+
+    nx, ny, nz = _MIRROR_PLANE_NORMALS[plane_normalised]
+    # SetMirror with a gp_Ax2 reflects across the plane defined by
+    # that frame; the axis itself is the plane normal.
+    frame = gp_Ax2(gp_Pnt(*origin), gp_Dir(nx, ny, nz))
+    trsf = gp_Trsf()
+    trsf.SetMirror(frame)
+    result = BRepBuilderAPI_Transform(shape, trsf, True).Shape()
+    validate_shape(result)
+    return result
+
+
+def apply_mirror_body(
+    scene: Scene,
+    item_id: str,
+    plane: str = "yz",
+    origin: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    *,
+    keep_original: bool = True,
+) -> str:
+    """Mirror the body identified by ``item_id`` across ``plane``.
+
+    When ``keep_original`` is True (the default) the mirrored body is
+    added as a NEW scene item and the original is left in place — this
+    matches "Mirror" intent in most CAD apps. Setting it False replaces
+    the original in place (sometimes useful for symmetric-feature
+    rebuilds).
+
+    Returns the item_id of the mirrored body (new or the original when
+    replaced).
+    """
+    scene_object = scene.get(item_id)
+    mirrored = mirror_shape(scene_object.shape, plane, origin)
+
+    if not keep_original:
+        scene.replace_shape(
+            item_id,
+            mirrored,
+            meta={
+                **scene_object.meta,
+                "last_operation": "mirror",
+                "mirror_plane": plane,
+            },
+        )
+        return item_id
+    meta = dict(scene_object.meta)
+    meta.update(
+        {
+            "source": "mirror",
+            "parent_item_id": item_id,
+            "mirror_plane": plane,
+        }
+    )
+    return scene.add_shape(mirrored, meta=meta)
+
+
+# ---------------------------------------------------------------------------
+# Axis-distance measurement.
+# ---------------------------------------------------------------------------
+
+
+def cylinder_axis_world_line(
+    shape: TopoDS_Shape,
+    face_index: int,
+) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    """Return ``(origin, direction)`` of a cylindrical face's axis."""
+    centre, axis, _radius, _length = cylindrical_face_parameters(shape, face_index)
+    return centre, _unit_vector(axis)
+
+
+def circle_axis_world_line(
+    shape: TopoDS_Shape,
+    edge_index: int,
+) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    """Return ``(centre, normal)`` of a circular edge's axis line."""
+    centre, axis, _radius = circular_edge_parameters(shape, edge_index)
+    return centre, _unit_vector(axis)
+
+
+def distance_between_axes(
+    line_a: tuple[
+        tuple[float, float, float],
+        tuple[float, float, float],
+    ],
+    line_b: tuple[
+        tuple[float, float, float],
+        tuple[float, float, float],
+    ],
+) -> float:
+    """Shortest distance between two infinite lines in world space."""
+    p1, d1 = line_a
+    p2, d2 = line_b
+    u = _unit_vector(d1)
+    v = _unit_vector(d2)
+    w = (p1[0] - p2[0], p1[1] - p2[1], p1[2] - p2[2])
+    cross = _cross3(u, v)
+    cross_len = (cross[0] ** 2 + cross[1] ** 2 + cross[2] ** 2) ** 0.5
+    if cross_len < 1e-9:
+        # Parallel axes: distance from p1 to line through p2.
+        proj = _dot3(w, v)
+        diff = (w[0] - v[0] * proj, w[1] - v[1] * proj, w[2] - v[2] * proj)
+        return (diff[0] ** 2 + diff[1] ** 2 + diff[2] ** 2) ** 0.5
+    return abs(_dot3(w, cross)) / cross_len
+
+
+# ---------------------------------------------------------------------------
+# Rib tool (triangular bracket between two planar faces).
+# ---------------------------------------------------------------------------
+
+
+def apply_rib_between_faces(
+    scene: Scene,
+    item_id: str,
+    base_face_index: int,
+    wall_face_index: int,
+    *,
+    along_base: float,
+    along_wall: float,
+    thickness: float,
+    offset_along_shared_edge: float = 0.0,
+) -> TopoDS_Shape:
+    """Add a triangular rib between two perpendicular planar faces.
+
+    The two faces must share an edge in the body; the rib is built in
+    the plane perpendicular to that shared edge, with one leg lying
+    along the base face for ``along_base`` mm, one leg lying along the
+    wall face for ``along_wall`` mm, and a hypotenuse closing the
+    triangle. The rib is then thickened by ``thickness`` mm centred on
+    ``offset_along_shared_edge`` (0 = centred on the edge's midpoint).
+    """
+    if along_base <= 0 or along_wall <= 0 or thickness <= 0:
+        raise ValueError("Rib dimensions must be positive.")
+
+    from cad_app.command_topology import _face_by_index as _face_at
+
+    scene_object = scene.get(item_id)
+    shape = scene_object.shape
+    base_face = _face_at(shape, base_face_index)
+    wall_face = _face_at(shape, wall_face_index)
+
+    shared_edge = _shared_edge(shape, base_face_index, wall_face_index)
+    if shared_edge is None:
+        raise UnsupportedTopologyError(
+            "Rib requires two faces that share an edge; pick a base "
+            "face and a wall face that meet."
+        )
+
+    base_normal = _face_outward_normal(base_face)
+    wall_normal = _face_outward_normal(wall_face)
+    edge_origin, edge_direction = _edge_origin_and_direction(shared_edge)
+    edge_unit = _unit_vector(edge_direction)
+
+    # The rib triangle lives in the plane perpendicular to the shared
+    # edge. We need two in-plane directions: one along the base face
+    # surface, one along the wall face surface, both perpendicular to
+    # the shared edge.
+    along_base_dir = _unit_vector(_cross3(base_normal, edge_unit))
+    along_wall_dir = _unit_vector(_cross3(wall_normal, edge_unit))
+
+    # Pick the signed direction that points AWAY from the wall (along
+    # the base surface, into the open side of the L) and AWAY from
+    # the base (along the wall surface, upward). The "step outward"
+    # test uses the opposing face's outward normal: along_base must
+    # have a positive component along the wall's outward normal, and
+    # along_wall must have a positive component along the base's
+    # outward normal.
+    along_base_dir = _orient_away_from(
+        along_base_dir, edge_origin, wall_face, wall_normal
+    )
+    along_wall_dir = _orient_away_from(
+        along_wall_dir, edge_origin, base_face, base_normal
+    )
+
+    half_thickness = thickness / 2.0
+    edge_mid = _midpoint_on_edge(shared_edge)
+    rib_centre = (
+        edge_mid[0] + edge_unit[0] * offset_along_shared_edge,
+        edge_mid[1] + edge_unit[1] * offset_along_shared_edge,
+        edge_mid[2] + edge_unit[2] * offset_along_shared_edge,
+    )
+
+    p_corner = rib_centre
+    p_along_base = (
+        rib_centre[0] + along_base_dir[0] * along_base,
+        rib_centre[1] + along_base_dir[1] * along_base,
+        rib_centre[2] + along_base_dir[2] * along_base,
+    )
+    p_along_wall = (
+        rib_centre[0] + along_wall_dir[0] * along_wall,
+        rib_centre[1] + along_wall_dir[1] * along_wall,
+        rib_centre[2] + along_wall_dir[2] * along_wall,
+    )
+
+    from OCP.BRepBuilderAPI import (
+        BRepBuilderAPI_MakeFace,
+        BRepBuilderAPI_MakePolygon,
+    )
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakePrism
+    from OCP.gp import gp_Pnt, gp_Vec
+
+    polygon = BRepBuilderAPI_MakePolygon()
+    polygon.Add(gp_Pnt(*p_corner))
+    polygon.Add(gp_Pnt(*p_along_base))
+    polygon.Add(gp_Pnt(*p_along_wall))
+    polygon.Close()
+    if not polygon.IsDone():
+        raise OperationFailedError("Rib triangle could not be built.")
+    face_builder = BRepBuilderAPI_MakeFace(polygon.Wire())
+    if not face_builder.IsDone():
+        raise OperationFailedError("Rib triangle face build failed.")
+    rib_face = face_builder.Face()
+
+    # Centre the prism on the shared edge by first translating the
+    # face -half_thickness along the edge direction.
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
+    from OCP.gp import gp_Trsf
+
+    shift = gp_Trsf()
+    shift.SetTranslation(
+        gp_Vec(
+            -edge_unit[0] * half_thickness,
+            -edge_unit[1] * half_thickness,
+            -edge_unit[2] * half_thickness,
+        )
+    )
+    rib_face = BRepBuilderAPI_Transform(rib_face, shift, True).Shape()
+
+    prism = BRepPrimAPI_MakePrism(
+        rib_face,
+        gp_Vec(
+            edge_unit[0] * thickness,
+            edge_unit[1] * thickness,
+            edge_unit[2] * thickness,
+        ),
+    ).Shape()
+    validate_shape(prism)
+
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
+
+    result = _run_boolean(shape, prism, BRepAlgoAPI_Fuse, "Rib fuse failed.")
+    meta = {
+        **scene_object.meta,
+        "last_operation": "rib",
+        "rib_along_base": float(along_base),
+        "rib_along_wall": float(along_wall),
+        "rib_thickness": float(thickness),
+    }
+    scene.replace_shape(item_id, result, meta=meta)
+    return result
+
+
+def _shared_edge(
+    shape: TopoDS_Shape,
+    face_index_a: int,
+    face_index_b: int,
+):
+    """Find an edge that bounds both face_index_a and face_index_b."""
+    from OCP.TopAbs import TopAbs_EDGE
+    from OCP.TopExp import TopExp
+    from OCP.TopoDS import TopoDS
+    from OCP.TopTools import TopTools_IndexedMapOfShape
+
+    face_map = Picker.indexed_map(shape, SelectionKind.FACE)
+    if face_index_a == face_index_b:
+        return None
+    face_a = TopoDS.Face_s(face_map.FindKey(face_index_a))
+    face_b = TopoDS.Face_s(face_map.FindKey(face_index_b))
+
+    edges_a = TopTools_IndexedMapOfShape()
+    TopExp.MapShapes_s(face_a, TopAbs_EDGE, edges_a)
+    edges_b = TopTools_IndexedMapOfShape()
+    TopExp.MapShapes_s(face_b, TopAbs_EDGE, edges_b)
+    for i in range(1, edges_a.Extent() + 1):
+        edge = edges_a.FindKey(i)
+        if edges_b.Contains(edge):
+            return TopoDS.Edge_s(edge)
+    return None
+
+
+def _face_outward_normal(face) -> tuple[float, float, float]:
+    from OCP.BRepAdaptor import BRepAdaptor_Surface
+    from OCP.GeomAbs import GeomAbs_Plane
+    from OCP.TopAbs import TopAbs_REVERSED
+
+    surface = BRepAdaptor_Surface(face)
+    if surface.GetType() != GeomAbs_Plane:
+        raise UnsupportedTopologyError("Rib host faces must be planar.")
+    normal = surface.Plane().Axis().Direction()
+    nx, ny, nz = normal.X(), normal.Y(), normal.Z()
+    if face.Orientation() == TopAbs_REVERSED:
+        nx, ny, nz = -nx, -ny, -nz
+    return (nx, ny, nz)
+
+
+def _edge_origin_and_direction(edge):
+    from OCP.BRepAdaptor import BRepAdaptor_Curve
+
+    curve = BRepAdaptor_Curve(edge)
+    p_start = curve.Value(curve.FirstParameter())
+    p_end = curve.Value(curve.LastParameter())
+    direction = (
+        p_end.X() - p_start.X(),
+        p_end.Y() - p_start.Y(),
+        p_end.Z() - p_start.Z(),
+    )
+    return (p_start.X(), p_start.Y(), p_start.Z()), direction
+
+
+def _midpoint_on_edge(edge) -> tuple[float, float, float]:
+    from OCP.BRepAdaptor import BRepAdaptor_Curve
+
+    curve = BRepAdaptor_Curve(edge)
+    mid_param = (curve.FirstParameter() + curve.LastParameter()) * 0.5
+    p = curve.Value(mid_param)
+    return (p.X(), p.Y(), p.Z())
+
+
+def _orient_away_from(
+    direction: tuple[float, float, float],
+    origin: tuple[float, float, float],
+    opposite_face,
+    opposite_face_normal: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    """Flip ``direction`` so that stepping from ``origin`` along it
+    moves AWAY from the half-space the opposite face encloses.
+
+    We rely on the opposite face's outward normal: stepping from a
+    point on the shared edge in the rib direction should put us on
+    the OUTWARD side of the opposite face (positive dot with the
+    opposite face's outward normal). If not, flip.
+    """
+    probe = (
+        origin[0] + direction[0],
+        origin[1] + direction[1],
+        origin[2] + direction[2],
+    )
+    relative = (
+        probe[0] - origin[0],
+        probe[1] - origin[1],
+        probe[2] - origin[2],
+    )
+    if _dot3(relative, opposite_face_normal) < 0:
+        return (-direction[0], -direction[1], -direction[2])
+    return direction

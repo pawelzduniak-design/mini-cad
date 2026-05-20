@@ -18,7 +18,7 @@ from cad_app.viewer_constants import (
     SKETCH_PREVIEW_OFFSET,
 )
 from cad_app.viewer_markers import ViewerMarkerMixin
-from cad_app.viewer_native import create_native_handle_capsule
+from cad_app.viewer_native import create_occt_window
 from cad_app.viewer_shapes import (
     add,
     build_arrow_shape,
@@ -53,11 +53,10 @@ __all__ = [
 
 if TYPE_CHECKING:
     from OCP.AIS import AIS_InteractiveContext, AIS_Shape
-    from OCP.Aspect import Aspect_DisplayConnection
+    from OCP.Aspect import Aspect_DisplayConnection, Aspect_Window
     from OCP.OpenGl import OpenGl_GraphicDriver
     from OCP.TopoDS import TopoDS_Shape
     from OCP.V3d import V3d_View, V3d_Viewer
-    from OCP.WNT import WNT_Window
 
 
 class Viewer(ViewerMarkerMixin):
@@ -69,7 +68,7 @@ class Viewer(ViewerMarkerMixin):
         self._viewer: V3d_Viewer | None = None
         self._view: V3d_View | None = None
         self._context: AIS_InteractiveContext | None = None
-        self._window: WNT_Window | None = None
+        self._window: Aspect_Window | None = None
         self._window_handle_capsule: Any | None = None
         self._native_widget: Any | None = None
         self._ais_map: dict[str, AIS_Shape] = {}
@@ -81,6 +80,7 @@ class Viewer(ViewerMarkerMixin):
         self._hover_marker: AIS_Shape | None = None
         self._preview_marker: AIS_Shape | None = None
         self._extrude_affordance_marker: AIS_Shape | None = None
+        self._sketch_snap_marker: AIS_Shape | None = None
         self._dimension_labels: list[Any] = []
         self._dimension_label: Any | None = None
         self._dimension_label_shadow: Any | None = None
@@ -180,12 +180,10 @@ class Viewer(ViewerMarkerMixin):
     def _bind_native_window(self) -> None:
         if self._native_widget is None or self._view is None:
             return
-        from OCP.WNT import WNT_Window
-
-        self._window_handle_capsule = create_native_handle_capsule(
-            self._native_widget.winId()
+        self._window, self._window_handle_capsule = create_occt_window(
+            self._display,
+            self._native_widget.winId(),
         )
-        self._window = WNT_Window(self._window_handle_capsule)
         self._view.SetWindow(self._window)
         if not self._window.IsMapped():
             self._window.Map()
@@ -698,4 +696,6 @@ class Viewer(ViewerMarkerMixin):
 
     @staticmethod
     def _create_native_handle_capsule(win_id: Any) -> Any:
+        from cad_app.viewer_native import create_native_handle_capsule
+
         return create_native_handle_capsule(win_id)

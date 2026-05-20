@@ -351,7 +351,8 @@ class ViewerWidgetActionsMixin:
             "undo": self._scene.can_undo() and self._move_session is None,
             "redo": self._scene.can_redo() and self._move_session is None,
             "new_project": True,
-            "save_project": False,
+            "save_project": not tool_active and len(self._body_item_ids()) > 0,
+            "open_project": not tool_active,
             "import_step": not tool_active,
             "add_box": not tool_active,
             "export_step": active_body_without_selection or selected_object_body,
@@ -392,7 +393,23 @@ class ViewerWidgetActionsMixin:
             "rotate_body_x": False,
             "rotate_body_y": False,
             "rotate_body_z": False,
-            "mirror_body": False,
+            "mirror_body": (
+                not tool_active
+                and (selected_object_body or active_body_without_selection)
+            ),
+            "rib_feature": (
+                not tool_active
+                and selection_count == 2
+                and all(sel.kind == SelectionKind.FACE for sel in selections)
+                and len({sel.item_id for sel in selections}) == 1
+            ),
+            "measure_axis_distance": (
+                selection_count == 2
+                and all(
+                    sel.kind in (SelectionKind.FACE, SelectionKind.EDGE)
+                    for sel in selections
+                )
+            ),
             "set_boolean_target": selected_object_body
             and not tool_active
             and boolean_target_item_id is None,
@@ -456,7 +473,15 @@ class ViewerWidgetActionsMixin:
             "fillet": False,
             "chamfer": False,
             "thread": (
-                selected_edge and self._selected_edge_is_circular() and not tool_active
+                not tool_active
+                and (
+                    (selected_edge and self._selected_edge_is_circular())
+                    or (
+                        selected_face
+                        and not selected_profile
+                        and self._selected_face_is_cylindrical()
+                    )
+                )
             ),
             "edit_edge_length": selected_edge_length_editable and not tool_active,
             "measure_distance": False,
@@ -626,7 +651,10 @@ class ViewerWidgetActionsMixin:
                 )
             return select_sections([("Body", [*BODY_ACTIONS, *BOOLEAN_ACTIONS])])
         if selection.kind == SelectionKind.FACE:
-            return select_sections([("Face", list(FACE_MODIFY_ACTIONS))])
+            face_actions = list(FACE_MODIFY_ACTIONS)
+            if self._selected_face_is_cylindrical():
+                face_actions.append("thread")
+            return select_sections([("Face", face_actions)])
         if selection.kind == SelectionKind.EDGE:
             edge_actions = list(EDGE_MODIFY_ACTIONS)
             if self._selected_edge_is_circular():

@@ -32,6 +32,9 @@ Qt/OCP window.
 - `check`: pytest, ruff, and black check.
 - `all`: check, safety, gui, and visual.
 
+Linux support is work in progress and is not documented as a ready-to-use test
+target yet.
+
 ## Contract Rules
 
 - Do not weaken tests to pass a patch.

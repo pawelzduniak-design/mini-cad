@@ -65,6 +65,10 @@ class ViewerMarkerMixin:
         self._hover_marker = None
 
     def clear_preview_marker(self, redraw: bool = True) -> None:
+        # The snap indicator lives alongside the sketch preview, so every
+        # path that clears the preview should drop it too (avoids a stale
+        # snap cross lingering after the cursor leaves a target).
+        self.clear_sketch_snap_marker(redraw=False)
         self._restore_preview_hidden_items()
         if not self.is_initialized:
             self._preview_marker = None
@@ -73,6 +77,15 @@ class ViewerMarkerMixin:
             return
         self.context.Remove(self._preview_marker, redraw)
         self._preview_marker = None
+
+    def clear_sketch_snap_marker(self, redraw: bool = True) -> None:
+        if not self.is_initialized:
+            self._sketch_snap_marker = None
+            return
+        if self._sketch_snap_marker is None:
+            return
+        self.context.Remove(self._sketch_snap_marker, redraw)
+        self._sketch_snap_marker = None
 
     def clear_extrude_affordance_marker(self, redraw: bool = True) -> None:
         if not self.is_initialized:
@@ -258,6 +271,36 @@ class ViewerMarkerMixin:
             edge_shape if edge_shape is not None else preview_shape,
             Quantity_Color(*sketch_preview_marker_color(), Quantity_TOC_RGB),
             width=5.5,
+            wireframe=True,
+            topmost=True,
+        )
+
+    def display_sketch_snap_marker(
+        self,
+        shape: TopoDS_Shape,
+        normal: tuple[float, float, float],
+    ) -> None:
+        """Highlight an active snap target during sketching.
+
+        Drawn topmost in a bright accent so it reads above the geometry
+        and the live sketch preview. Stored separately from the preview
+        marker so the two never overwrite each other.
+        """
+        from OCP.Quantity import Quantity_Color, Quantity_TOC_RGB
+
+        if not self.is_initialized:
+            return
+        self.clear_sketch_snap_marker(redraw=False)
+        offset_shape = translated_shape(
+            shape,
+            normal[0] * SKETCH_PREVIEW_OFFSET,
+            normal[1] * SKETCH_PREVIEW_OFFSET,
+            normal[2] * SKETCH_PREVIEW_OFFSET,
+        )
+        self._sketch_snap_marker = self._display_marker(
+            offset_shape,
+            Quantity_Color(1.0, 0.82, 0.18, Quantity_TOC_RGB),
+            width=3.0,
             wireframe=True,
             topmost=True,
         )

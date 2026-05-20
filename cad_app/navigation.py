@@ -232,6 +232,34 @@ class NavigationController:
         self._is_orbiting = False
         self._last_pos = None
 
+    def orbit_by(
+        self,
+        cx: int | float,
+        cy: int | float,
+        dx: int | float,
+        dy: int | float,
+    ) -> None:
+        """Orbit the camera by a fixed screen-space delta.
+
+        Drives the same OCCT trackball as the mouse orbit, but from a
+        synthesized start/end pair so keyboard arrows can nudge the view
+        around the object. ``(cx, cy)`` is the grab point (the viewport
+        centre) and ``(dx, dy)`` is the drag offset in the same pixel
+        space the mouse handlers use.
+        """
+        if self._view is None or not hasattr(self._view, "StartRotation"):
+            return
+        cx, cy = self._screen_ints(cx, cy)
+        self._view.StartRotation(cx, cy)
+        ex, ey = self._screen_ints(cx + dx, cy + dy)
+        if hasattr(self._view, "Rotation"):
+            self._view.Rotation(ex, ey)
+        if hasattr(self._view, "Redraw"):
+            self._view.Redraw()
+        # An explicit orbit invalidates the pre-sketch snapshot, same as
+        # begin_orbit.
+        self._pre_sketch_view = None
+
     def begin_pan(self, x: int | float, y: int | float) -> None:
         x, y = self._screen_ints(x, y)
         self._is_panning = True

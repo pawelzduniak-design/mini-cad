@@ -10,9 +10,8 @@ from pathlib import Path
 from time import perf_counter
 
 from cad_app.env import ensure_runtime_dependencies
-from cad_app.main_window import create_main_window
+from cad_app.platform_runtime import configure_platform_environment
 from cad_app.scene import Scene
-from cad_app.viewer import Viewer
 
 LOGGER = logging.getLogger(__name__)
 
@@ -113,8 +112,15 @@ def run() -> None:
     with logged_stage("Runtime dependency check"):
         ensure_runtime_dependencies()
 
+    with logged_stage("Platform environment"):
+        configure_platform_environment()
+
     with logged_stage("PySide6 import"):
         from PySide6.QtWidgets import QApplication
+
+    with logged_stage("CAD UI import"):
+        from cad_app.main_window import create_main_window
+        from cad_app.viewer import Viewer
 
     with logged_stage("QApplication create"):
         app = QApplication([])

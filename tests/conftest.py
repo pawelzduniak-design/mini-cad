@@ -17,6 +17,9 @@ def require_ocp() -> None:
 
 
 def require_qt() -> None:
+    from cad_app.platform_runtime import configure_platform_environment
+
+    configure_platform_environment()
     if find_spec("PySide6") is None:
         pytest.skip("PySide6 is not installed in the active environment.")
 

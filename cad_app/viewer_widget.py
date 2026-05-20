@@ -101,6 +101,13 @@ class ViewerWidget(
         self._active_workplane = Workplane.world_xy()
         self._active_workplane_label = "XY"
         self._active_workplane_host: tuple[str, int] | None = None
+        # "centroid" (default) anchors face workplanes on the face's
+        # centre of mass; "corner" anchors them on the lowest-UV
+        # vertex of the face. Corner anchoring lets users type
+        # absolute X/Y in mm from the face's bottom-left corner,
+        # which stays stable when neighbouring features re-trim the
+        # face. Toggled by Sketch > "Anchor at face corner".
+        self._workplane_anchor: str = "centroid"
         self._selection_source: str | None = None
         self._hud_labels: dict[str, QLabel] = {}
         self._actions: dict[str, QAction] = {}

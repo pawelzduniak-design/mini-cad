@@ -102,14 +102,28 @@ def _face_vertex_indexes(shape: TopoDS_Shape, face: TopoDS_Face) -> set[int]:
     return indexes
 
 
-def _assert_all_faces_planar(shape: TopoDS_Shape) -> None:
+def _assert_all_faces_planar(
+    shape: TopoDS_Shape,
+    *,
+    context: str = "Edge/vertex move",
+) -> None:
+    """Reject shapes that contain non-planar faces.
+
+    The default error message mentioned only edge/vertex move, which
+    misled face-move callers when the same guard rejected their
+    request. Callers can pass ``context`` (e.g. ``"Sideways face
+    move"``) so the message points at the actual command and hints at
+    the workaround.
+    """
     from OCP.TopoDS import TopoDS
 
     face_map = Picker.indexed_map(shape, SelectionKind.FACE)
     for index in range(1, face_map.Extent() + 1):
         if not _is_planar_face(TopoDS.Face_s(face_map.FindKey(index))):
             raise UnsupportedTopologyError(
-                "Edge/vertex move supports only planar-faced solids."
+                f"{context} requires a body whose every face is planar "
+                "(no holes, fillets, or revolved surfaces). Push the "
+                "face in its normal direction instead."
             )
 
 

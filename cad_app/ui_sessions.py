@@ -111,6 +111,12 @@ class MoveSession:
     drag_view_start_point: tuple[float, float, float] | None = None
     axis_point: tuple[float, float, float] | None = None
     elevation: float = 0.0
+    # Largest preview distance the underlying operation accepted. Used
+    # for fillet/chamfer so we can warn the user during the drag when
+    # they push past the feasible radius (preview silently fails) and
+    # surface a "try R <= X mm" hint when commit fails.
+    last_successful_preview_distance: float | None = None
+    last_preview_failed: bool = False
 
 
 @dataclass
@@ -135,3 +141,7 @@ class SketchSession:
     drag_moved: bool = False
     drag_end_uv: tuple[float, float] | None = None
     drag_dimensions: str | None = None
+    # Last snap target hit while projecting the cursor (for the snap
+    # indicator marker + status). Holds a SnapCandidate or None; typed
+    # loosely to avoid importing the snapping module into this dataclass.
+    last_snap: object | None = None

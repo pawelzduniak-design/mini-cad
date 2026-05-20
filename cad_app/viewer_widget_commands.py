@@ -4,17 +4,34 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import QPoint, QRect
-from PySide6.QtWidgets import QFileDialog, QInputDialog
+from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtWidgets import (
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QDoubleSpinBox,
+    QFileDialog,
+    QFormLayout,
+    QInputDialog,
+    QLabel,
+    QVBoxLayout,
+)
 
 from cad_app.commands import (
     CommandError,
     apply_circle_feature,
     apply_extrude_face,
+    apply_mirror_body,
     apply_move_object,
     apply_remove_face,
+    apply_rib_between_faces,
     apply_thread_to_edge,
+    circle_axis_world_line,
     circular_edge_parameters,
+    cylinder_axis_world_line,
+    cylindrical_face_anchor_edge_index,
+    cylindrical_face_parameters,
+    distance_between_axes,
     thread_default_length,
     translated_shape,
 )
@@ -27,9 +44,9 @@ from cad_app.measurement import (
 )
 from cad_app.sketch import is_sketch_object, is_sketch_profile
 from cad_app.thread_specs import (
-    THREAD_MODES,
-    THREAD_TYPES,
+    default_thread_pitch_for_diameter,
     matching_thread_preset_for_edge_diameter,
+    thread_depth_from_pitch,
     thread_parameters_from_preset,
     thread_preset_by_name,
     thread_preset_names,
@@ -133,7 +150,260 @@ class ViewerWidgetCommandsMixin:
         self._show_status("STEP exported")
         LOGGER.info("STEP exported path=%s item_id=%s", path, item_id)
 
+    def _save_project_dialog(self) -> None:
+        """Native project save (Ctrl+S). Writes a .cadproj JSON file
+        that round-trips every scene item with its BREP shape and meta
+        (including feature_history), so re-opening the file restores
+        the exact editing state — unlike STEP which discards meta.
+        """
+        from cad_app.io_project import ProjectIOError, save_project
+
+        if len(self._scene) == 0:
+            self._show_status("Nothing to save")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self.window(),
+            "Save Project",
+            "",
+            "CAD project (*.cadproj *.json);;All files (*.*)",
+        )
+        if not path:
+            return
+        try:
+            save_project(self._scene, path)
+        except ProjectIOError as exc:
+            LOGGER.warning(
+                "Project save failed path=%s: %s",
+                path,
+                exc,
+                exc_info=True,
+            )
+            self._show_status("Save failed")
+            return
+        self._show_status("Project saved")
+        LOGGER.info("Project saved path=%s items=%d", path, len(self._scene))
+
+    def _open_project_dialog(self) -> None:
+        """Native project open. Drops the current scene state and
+        rebuilds from the saved file. Asks for confirmation when the
+        scene already has bodies, the same way New Project does."""
+        from PySide6.QtWidgets import QMessageBox
+
+        from cad_app.io_project import ProjectIOError, load_project
+
+        if len(self._scene) > 0:
+            answer = QMessageBox.question(
+                self.window(),
+                "Open Project",
+                "Discard current model and load project file?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                self._show_status("Open project cancelled")
+                return
+
+        path, _ = QFileDialog.getOpenFileName(
+            self.window(),
+            "Open Project",
+            "",
+            "CAD project (*.cadproj *.json);;All files (*.*)",
+        )
+        if not path:
+            return
+        try:
+            loaded = load_project(path)
+        except ProjectIOError as exc:
+            LOGGER.warning(
+                "Project load failed path=%s: %s",
+                path,
+                exc,
+                exc_info=True,
+            )
+            self._show_status("Open failed")
+            return
+
+        # Replace the scene's state with the loaded one. We assign
+        # items / active id directly to keep undo history empty after
+        # load (loading should not be undoable).
+        self._scene.clear()
+        for item in loaded:
+            self._scene._items[item.item_id] = item  # noqa: SLF001
+        active = loaded.active_item_id()
+        if active is not None:
+            self._scene._active_item_id = active  # noqa: SLF001
+        self._scene.set_selection(None)
+        self._hover_selection = None
+        if self._viewer.is_initialized:
+            self._viewer.display_scene(self._scene, fit=True)
+            self._navigation.capture_home()
+        self._show_status("Project opened")
+        LOGGER.info("Project opened path=%s items=%d", path, len(self._scene))
+
+    def _mirror_active_body_dialog(self) -> None:
+        """Mirror the selected body across an XY / YZ / XZ plane.
+
+        The mirrored body is added as a separate scene item by default
+        so the user can still see both halves; a "Replace original"
+        checkbox in the dialog lets them flip the original instead.
+        """
+        item_id = self._selected_or_active_body_item_id()
+        if item_id is None:
+            self._show_status("Select a body to mirror")
+            return
+        dialog = MirrorDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        plane, origin, replace = dialog.parameters()
+        try:
+            new_id = apply_mirror_body(
+                self._scene,
+                item_id,
+                plane,
+                origin,
+                keep_original=not replace,
+            )
+        except (CommandError, ValueError) as exc:
+            LOGGER.warning("Mirror failed: %s", exc, exc_info=True)
+            self._show_status("Mirror failed")
+            return
+        self._scene.set_selection(None)
+        self._hover_selection = None
+        if self._viewer.is_initialized:
+            self._viewer.display_scene(self._scene, fit=False)
+        verb = "mirrored in place" if replace else "mirrored as new body"
+        self._show_status(f"Body {verb} across {plane.upper()} plane")
+        LOGGER.info(
+            "Mirror applied source=%s result=%s plane=%s replace=%s",
+            item_id,
+            new_id,
+            plane,
+            replace,
+        )
+
+    def _measure_axis_distance(self) -> None:
+        """Measure the shortest distance between the axes of two
+        cylindrical features (cylindrical faces or circular edges).
+
+        This complements the existing edge-to-edge distance: with two
+        circular hole rims selected, the user usually wants the
+        centre-to-centre distance, not the chord between rim edges.
+        """
+        selections = self._scene.selection_refs()
+        if len(selections) != 2:
+            self._show_status(
+                "Select two cylindrical faces or circular edges to measure axes"
+            )
+            return
+        try:
+            lines = [self._axis_line_for_selection(sel) for sel in selections]
+        except (CommandError, IndexError, RuntimeError, ValueError) as exc:
+            LOGGER.debug("Axis measure failed: %s", exc, exc_info=True)
+            self._show_status("Both picks must be cylindrical faces or circular edges")
+            return
+        if any(line is None for line in lines):
+            self._show_status("Both picks must be cylindrical faces or circular edges")
+            return
+        distance = distance_between_axes(lines[0], lines[1])
+        self._show_status(f"Axis distance: {distance:.3f} mm")
+        if self._viewer.is_initialized:
+            midpoint = (
+                (lines[0][0][0] + lines[1][0][0]) * 0.5,
+                (lines[0][0][1] + lines[1][0][1]) * 0.5,
+                (lines[0][0][2] + lines[1][0][2]) * 0.5,
+            )
+            self._viewer.display_dimension_label(
+                f"{distance:.2f} mm",
+                midpoint,
+            )
+        LOGGER.info("Axis distance measured: %.3f mm", distance)
+
+    def _axis_line_for_selection(self, selection: SelectionRef):
+        shape = self._scene.get(selection.item_id).shape
+        if selection.kind == SelectionKind.FACE:
+            try:
+                return cylinder_axis_world_line(shape, selection.index)
+            except (CommandError, IndexError, RuntimeError, ValueError):
+                return None
+        if selection.kind == SelectionKind.EDGE:
+            try:
+                return circle_axis_world_line(shape, selection.index)
+            except (CommandError, IndexError, RuntimeError, ValueError):
+                return None
+        return None
+
+    def _rib_between_selected_faces_dialog(self) -> None:
+        """Build a triangular rib between two perpendicular planar
+        faces the user has selected. Expects exactly two FACE picks
+        (multi-select); the first is treated as the base face, the
+        second as the wall. They must share an edge in the body.
+        """
+        selections = self._scene.selection_refs()
+        face_picks = [sel for sel in selections if sel.kind == SelectionKind.FACE]
+        if len(face_picks) != 2:
+            self._show_status(
+                "Select two perpendicular faces (base + wall) for the rib"
+            )
+            return
+        if face_picks[0].item_id != face_picks[1].item_id:
+            self._show_status("Rib needs two faces of the same body")
+            return
+        item_id = face_picks[0].item_id
+        dialog = RibDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        params = dialog.parameters()
+        try:
+            apply_rib_between_faces(
+                self._scene,
+                item_id,
+                face_picks[0].index,
+                face_picks[1].index,
+                along_base=params["along_base"],
+                along_wall=params["along_wall"],
+                thickness=params["thickness"],
+                offset_along_shared_edge=params["offset"],
+            )
+        except (CommandError, ValueError) as exc:
+            LOGGER.warning("Rib failed: %s", exc, exc_info=True)
+            self._show_status(f"Rib failed: {exc}")
+            return
+        self._scene.set_selection(None)
+        self._hover_selection = None
+        if self._viewer.is_initialized:
+            self._viewer.display_scene(self._scene, fit=False)
+        self._show_status("Rib added")
+        LOGGER.info(
+            "Rib applied item=%s base_face=%d wall_face=%d "
+            "along_base=%.2f along_wall=%.2f thickness=%.2f offset=%.2f",
+            item_id,
+            face_picks[0].index,
+            face_picks[1].index,
+            params["along_base"],
+            params["along_wall"],
+            params["thickness"],
+            params["offset"],
+        )
+
     def _add_box_body(self) -> None:
+        """Add a new box body. When a planar face is selected, the new
+        box snaps onto it (its -Z face coincides with the picked face
+        and the bbox is centred on the face centroid); otherwise the
+        box is placed next to existing bodies along +X.
+        """
+        selection = self._scene.selection()
+        if selection is not None and selection.kind == SelectionKind.FACE:
+            try:
+                self._add_box_on_face(selection)
+                return
+            except (CommandError, IndexError, RuntimeError, ValueError) as exc:
+                LOGGER.debug(
+                    "Add Box on Face failed; falling back to offset placement: %s",
+                    exc,
+                    exc_info=True,
+                )
+                # fall through to the offset placement below
+
         body_count = len(self._body_item_ids())
         try:
             shape = translated_shape(
@@ -160,6 +430,68 @@ class ViewerWidgetCommandsMixin:
             self._navigation.capture_home()
         self._show_status("Box body added")
         LOGGER.info("Box body added item_id=%s index=%d", item_id, body_count + 1)
+
+    def _add_box_on_face(self, selection: SelectionRef) -> None:
+        """Place a fresh box body so its -Z face snaps onto the picked
+        planar face, centred at the face centroid."""
+        from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
+        from OCP.gp import gp_Ax3, gp_Dir, gp_Pnt, gp_Trsf
+
+        from cad_app.command_topology import _face_by_index
+        from cad_app.workplane import Workplane
+
+        host_shape = self._scene.get(selection.item_id).shape
+        face = _face_by_index(host_shape, selection.index)
+        workplane = Workplane.from_face(face)
+
+        # Default snapped-box size: 40x40x20 mm. Placed so the -Z face
+        # of the local box lies on the workplane, centred on origin.
+        body_count = len(self._body_item_ids())
+        box_shape = make_box(40.0, 40.0, 20.0)
+
+        # Build a gp_Trsf that maps the world XY plane (the default
+        # frame of make_box) onto the workplane.
+        local_frame = gp_Ax3(
+            gp_Pnt(0.0, 0.0, 0.0),
+            gp_Dir(0.0, 0.0, 1.0),
+            gp_Dir(1.0, 0.0, 0.0),
+        )
+        target_frame = gp_Ax3(
+            gp_Pnt(workplane.origin.X(), workplane.origin.Y(), workplane.origin.Z()),
+            gp_Dir(workplane.normal.X(), workplane.normal.Y(), workplane.normal.Z()),
+            gp_Dir(
+                workplane.x_direction.X(),
+                workplane.x_direction.Y(),
+                workplane.x_direction.Z(),
+            ),
+        )
+        trsf = gp_Trsf()
+        trsf.SetTransformation(target_frame, local_frame)
+        snapped = BRepBuilderAPI_Transform(box_shape, trsf, True).Shape()
+
+        item_id = self._scene.add_shape(
+            snapped,
+            meta={
+                "kind": "body",
+                "source": "primitive_box",
+                "body_index": body_count + 1,
+                "snap_host_item_id": selection.item_id,
+                "snap_host_face": selection.index,
+            },
+        )
+        self._scene.set_active_item(item_id)
+        self._scene.set_selection(None)
+        self._hover_selection = None
+        if self._viewer.is_initialized:
+            self._viewer.display_scene(self._scene, fit=True)
+            self._navigation.capture_home()
+        self._show_status("Box snapped onto face")
+        LOGGER.info(
+            "Box body snapped item_id=%s host=%s face=%d",
+            item_id,
+            selection.item_id,
+            selection.index,
+        )
 
     def _selected_edge_measurement(self) -> EdgeMeasurement | None:
         selection = self._scene.selection()
@@ -193,131 +525,73 @@ class ViewerWidgetCommandsMixin:
             return False
         return True
 
-    def _thread_on_selected_edge_dialog(self) -> None:
+    def _selected_face_is_cylindrical(self) -> bool:
         selection = self._scene.selection()
-        if selection is None or selection.kind != SelectionKind.EDGE:
-            self._show_status("Select a circular edge first")
-            return
+        if selection is None or selection.kind != SelectionKind.FACE:
+            return False
         try:
-            _center, axis, radius = circular_edge_parameters(
+            cylindrical_face_parameters(
                 self._scene.get(selection.item_id).shape,
                 selection.index,
             )
-        except (CommandError, IndexError, RuntimeError, ValueError) as exc:
-            LOGGER.warning("Thread start failed: %s", exc, exc_info=True)
-            self._show_status("Thread requires a circular edge")
-            return
+        except (CommandError, IndexError, RuntimeError, ValueError):
+            return False
+        return True
 
-        preset_names = thread_preset_names()
+    def _thread_on_selected_edge_dialog(self) -> None:
+        """Entry point bound to the Thread action. Accepts both a
+        circular edge selection (legacy) and a cylindrical face
+        selection (preferred): on a face we infer the diameter, the
+        body-axis length, the matching ISO/UNC preset, and feed all
+        of that to the ONE consolidated dialog instead of asking the
+        user the same questions across five sequential popups.
+        """
+        resolved = self._resolve_thread_target()
+        if resolved is None:
+            return
+        item_id, edge_index, radius, axis, face_length = resolved
+        shape = self._scene.get(item_id).shape
+
         matching_preset = matching_thread_preset_for_edge_diameter(radius * 2.0)
-        default_preset = "Custom" if matching_preset is None else matching_preset.name
-        preset_index = preset_names.index(default_preset)
-        preset_name, ok = QInputDialog.getItem(
-            self,
-            "Thread",
-            "Preset",
-            preset_names,
-            preset_index,
-            False,
-        )
-        if not ok:
-            return
-        preset = thread_preset_by_name(preset_name)
-        if preset is None:
-            default_pitch = max(0.5, min(3.0, radius * 0.18))
-            default_depth = max(0.15, default_pitch * 0.35)
-            standard = "custom"
-            size = "custom"
-            major_diameter = None
-            minor_diameter = None
+        # Length default: prefer the cylindrical face's own axial extent
+        # so the thread covers the picked wall exactly. Fall back to the
+        # generic body-span heuristic when we only had an edge to work
+        # with.
+        if face_length is not None and face_length > 0:
+            default_length = float(face_length)
         else:
-            preset_params = thread_parameters_from_preset(preset)
-            default_pitch = float(preset_params["pitch"])
-            default_depth = float(preset_params["depth"])
-            standard = str(preset_params["standard"])
-            size = str(preset_params["size"])
-            major_diameter = float(preset_params["major_diameter"])
-            minor_diameter = float(preset_params["minor_diameter"])
-        mode_label, ok = QInputDialog.getItem(
+            default_length = thread_default_length(
+                shape,
+                axis,
+                edge_radius=radius,
+            )
+
+        dialog = ThreadDialog(
             self,
-            "Thread",
-            "Representation",
-            ["Modeled", "Cosmetic"],
-            0,
-            False,
+            edge_diameter=radius * 2.0,
+            default_length=default_length,
+            default_preset_name=(
+                "Custom" if matching_preset is None else matching_preset.name
+            ),
         )
-        if not ok:
+        if dialog.exec() != QDialog.Accepted:
             return
-        mode = mode_label.lower()
-        if mode not in THREAD_MODES:
-            self._show_status("Unsupported thread representation")
-            return
-        type_label, ok = QInputDialog.getItem(
-            self,
-            "Thread",
-            "Thread Type",
-            ["Auto", "External", "Internal"],
-            0,
-            False,
-        )
-        if not ok:
-            return
-        thread_type = type_label.lower()
-        if thread_type not in THREAD_TYPES:
-            self._show_status("Unsupported thread type")
-            return
-        default_length = thread_default_length(
-            self._scene.get(selection.item_id).shape,
-            axis,
-            edge_radius=radius,
-        )
-        pitch, ok = QInputDialog.getDouble(
-            self,
-            "Thread",
-            "Pitch (mm)",
-            default_pitch,
-            0.001,
-            1_000_000.0,
-            2,
-        )
-        if not ok:
-            return
-        length, ok = QInputDialog.getDouble(
-            self,
-            "Thread",
-            "Length (mm)",
-            default_length,
-            0.001,
-            1_000_000.0,
-            2,
-        )
-        if not ok:
-            return
-        depth, ok = QInputDialog.getDouble(
-            self,
-            "Thread",
-            "Depth (mm)",
-            default_depth,
-            0.001,
-            1_000_000.0,
-            2,
-        )
-        if not ok:
-            return
+        params = dialog.parameters()
+
         try:
             apply_thread_to_edge(
                 self._scene,
-                selection.item_id,
-                selection.index,
-                pitch,
-                length,
-                depth,
-                mode=mode,
-                thread_type=thread_type,
-                standard=standard,
-                size=size,
-                major_diameter=major_diameter,
-                minor_diameter=minor_diameter,
+                item_id,
+                edge_index,
+                params["pitch"],
+                params["length"],
+                params["depth"],
+                mode=params["mode"],
+                thread_type=params["thread_type"],
+                standard=params["standard"],
+                size=params["size"],
+                major_diameter=params["major_diameter"],
+                minor_diameter=params["minor_diameter"],
             )
         except (CommandError, IndexError, RuntimeError, ValueError) as exc:
             LOGGER.warning("Thread failed: %s", exc, exc_info=True)
@@ -328,23 +602,58 @@ class ViewerWidgetCommandsMixin:
         if self._viewer.is_initialized:
             self._viewer.display_scene(self._scene, fit=False)
         self._show_status(
-            f"Thread added: {standard} {size}, {mode}, "
-            f"pitch {pitch:.2f} mm, length {length:.2f} mm"
+            f"Thread added: {params['standard']} {params['size']}, "
+            f"{params['mode']}, pitch {params['pitch']:.2f} mm, "
+            f"length {params['length']:.2f} mm"
         )
         self._set_context_hint("Thread feature applied")
         LOGGER.info(
             "Thread applied item_id=%s edge=%d standard=%s size=%s "
             "mode=%s type=%s pitch=%.2f length=%.2f depth=%.2f",
-            selection.item_id,
-            selection.index,
-            standard,
-            size,
-            mode,
-            thread_type,
-            pitch,
-            length,
-            depth,
+            item_id,
+            edge_index,
+            params["standard"],
+            params["size"],
+            params["mode"],
+            params["thread_type"],
+            params["pitch"],
+            params["length"],
+            params["depth"],
         )
+
+    def _resolve_thread_target(self):
+        """Turn the current selection into (item_id, edge_index, radius,
+        axis, face_length) for the thread dialog. ``face_length`` is set
+        only when the user selected a cylindrical face, so the dialog
+        can default the thread length to that face's actual extent
+        instead of a generic body-span estimate.
+        """
+        selection = self._scene.selection()
+        if selection is None:
+            self._show_status("Select a cylindrical face or a circular edge")
+            return None
+        shape = self._scene.get(selection.item_id).shape
+        if selection.kind == SelectionKind.FACE:
+            try:
+                _center, axis, radius, length = cylindrical_face_parameters(
+                    shape, selection.index
+                )
+                edge_index = cylindrical_face_anchor_edge_index(shape, selection.index)
+            except (CommandError, IndexError, RuntimeError, ValueError) as exc:
+                LOGGER.warning("Thread on face start failed: %s", exc, exc_info=True)
+                self._show_status("Thread requires a cylindrical face")
+                return None
+            return (selection.item_id, edge_index, radius, axis, length)
+        if selection.kind == SelectionKind.EDGE:
+            try:
+                _center, axis, radius = circular_edge_parameters(shape, selection.index)
+            except (CommandError, IndexError, RuntimeError, ValueError) as exc:
+                LOGGER.warning("Thread on edge start failed: %s", exc, exc_info=True)
+                self._show_status("Thread requires a circular edge")
+                return None
+            return (selection.item_id, selection.index, radius, axis, None)
+        self._show_status("Select a cylindrical face or a circular edge")
+        return None
 
     def _measure_selected_edge(self) -> None:
         selection = self._scene.selection()
@@ -1210,3 +1519,238 @@ class ViewerWidgetCommandsMixin:
             self._viewer.display_scene(self._scene, fit=False)
         self._show_status("Face removed")
         LOGGER.info("Face removed item_id=%s face=%d", item_id, face_index)
+
+
+class ThreadDialog(QDialog):
+    """Consolidated thread parameter form. Previous flow surfaced five
+    sequential ``QInputDialog`` popups (preset, mode, type, then three
+    numeric prompts) - changing one value forced rebuilding the whole
+    chain. This dialog shows everything at once, with the preset combo
+    driving pitch / depth / standard / size so picking M10 fills in the
+    matching ISO values without the user retyping them.
+    """
+
+    def __init__(
+        self,
+        parent,
+        *,
+        edge_diameter: float,
+        default_length: float,
+        default_preset_name: str,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Thread")
+        self.setModal(True)
+        self._edge_diameter = float(edge_diameter)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight)
+        layout.addLayout(form)
+
+        diameter_label = QLabel(f"{self._edge_diameter:.2f} mm")
+        diameter_label.setObjectName("ThreadDialogDiameter")
+        form.addRow("Detected diameter:", diameter_label)
+
+        self._preset_combo = QComboBox(self)
+        for name in thread_preset_names():
+            self._preset_combo.addItem(name)
+        if default_preset_name in thread_preset_names():
+            self._preset_combo.setCurrentText(default_preset_name)
+        form.addRow("Preset:", self._preset_combo)
+
+        self._mode_combo = QComboBox(self)
+        self._mode_combo.addItems(["Modeled", "Cosmetic"])
+        form.addRow("Representation:", self._mode_combo)
+
+        self._type_combo = QComboBox(self)
+        self._type_combo.addItems(["Auto", "External", "Internal"])
+        form.addRow("Thread type:", self._type_combo)
+
+        self._length_spin = self._make_double_spin(default_length)
+        form.addRow("Length (mm):", self._length_spin)
+
+        seed_pitch = default_thread_pitch_for_diameter(max(self._edge_diameter, 0.001))
+        seed_depth = thread_depth_from_pitch(seed_pitch)
+        self._pitch_spin = self._make_double_spin(seed_pitch)
+        form.addRow("Pitch (mm):", self._pitch_spin)
+
+        self._depth_spin = self._make_double_spin(seed_depth)
+        form.addRow("Depth (mm):", self._depth_spin)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel,
+            parent=self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        # Whenever the preset changes, refresh pitch / depth from it so
+        # the user doesn't have to type 1.50 mm after selecting M10x1.5.
+        self._preset_combo.currentTextChanged.connect(self._apply_preset_values)
+        # Push the initial preset's values into the spin boxes.
+        self._apply_preset_values(self._preset_combo.currentText())
+
+    @staticmethod
+    def _make_double_spin(default_value: float) -> QDoubleSpinBox:
+        spin = QDoubleSpinBox()
+        spin.setDecimals(2)
+        spin.setRange(0.001, 1_000_000.0)
+        spin.setValue(float(default_value))
+        spin.setSingleStep(0.1)
+        return spin
+
+    def _apply_preset_values(self, preset_name: str) -> None:
+        preset = thread_preset_by_name(preset_name)
+        if preset is None:
+            # Custom: reseed pitch/depth proportional to the picked
+            # diameter. The previous build defaulted to pitch=1.0
+            # regardless of size, so an 80 mm cylinder ended up with
+            # ~80 thread turns and a 25+ second rebuild.
+            pitch = default_thread_pitch_for_diameter(max(self._edge_diameter, 0.001))
+            self._pitch_spin.setValue(pitch)
+            self._depth_spin.setValue(thread_depth_from_pitch(pitch))
+            return
+        params = thread_parameters_from_preset(preset)
+        self._pitch_spin.setValue(float(params["pitch"]))
+        self._depth_spin.setValue(float(params["depth"]))
+
+    def parameters(self) -> dict:
+        preset = thread_preset_by_name(self._preset_combo.currentText())
+        if preset is None:
+            standard = "custom"
+            size = "custom"
+            major_diameter = None
+            minor_diameter = None
+        else:
+            preset_params = thread_parameters_from_preset(preset)
+            standard = str(preset_params["standard"])
+            size = str(preset_params["size"])
+            major_diameter = float(preset_params["major_diameter"])
+            minor_diameter = float(preset_params["minor_diameter"])
+        mode = self._mode_combo.currentText().lower()
+        thread_type = self._type_combo.currentText().lower()
+        return {
+            "pitch": float(self._pitch_spin.value()),
+            "length": float(self._length_spin.value()),
+            "depth": float(self._depth_spin.value()),
+            "mode": mode,
+            "thread_type": thread_type,
+            "standard": standard,
+            "size": size,
+            "major_diameter": major_diameter,
+            "minor_diameter": minor_diameter,
+        }
+
+
+class MirrorDialog(QDialog):
+    """Pick a mirror plane (XY / YZ / XZ) and an offset along its
+    normal. By default the mirrored body is added as a new scene item
+    so the original stays in place — there's a "Replace original" box
+    for users who want a symmetric in-place rebuild instead.
+    """
+
+    def __init__(self, parent) -> None:
+        from PySide6.QtWidgets import QCheckBox
+
+        super().__init__(parent)
+        self.setWindowTitle("Mirror Body")
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight)
+        layout.addLayout(form)
+
+        self._plane_combo = QComboBox(self)
+        self._plane_combo.addItem("YZ plane (mirror across X = const)", "yz")
+        self._plane_combo.addItem("XZ plane (mirror across Y = const)", "xz")
+        self._plane_combo.addItem("XY plane (mirror across Z = const)", "xy")
+        form.addRow("Mirror plane:", self._plane_combo)
+
+        self._offset_spin = QDoubleSpinBox(self)
+        self._offset_spin.setDecimals(2)
+        self._offset_spin.setRange(-1_000_000.0, 1_000_000.0)
+        self._offset_spin.setValue(0.0)
+        self._offset_spin.setSingleStep(1.0)
+        self._offset_spin.setToolTip(
+            "Coordinate of the mirror plane along its normal "
+            "(e.g. YZ plane at X = -10 reflects the body around X = -10)."
+        )
+        form.addRow("Plane offset (mm):", self._offset_spin)
+
+        self._replace_check = QCheckBox("Replace original body", self)
+        self._replace_check.setChecked(False)
+        layout.addWidget(self._replace_check)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel,
+            parent=self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def parameters(self):
+        plane = str(self._plane_combo.currentData())
+        offset_value = float(self._offset_spin.value())
+        if plane == "yz":
+            origin = (offset_value, 0.0, 0.0)
+        elif plane == "xz":
+            origin = (0.0, offset_value, 0.0)
+        else:
+            origin = (0.0, 0.0, offset_value)
+        return plane, origin, bool(self._replace_check.isChecked())
+
+
+class RibDialog(QDialog):
+    """Parameters for the triangular rib between two perpendicular
+    planar faces. The user has already selected the two host faces;
+    this dialog only collects the rib's leg lengths, thickness, and
+    optional offset along the shared edge.
+    """
+
+    def __init__(self, parent) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Rib")
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight)
+        layout.addLayout(form)
+
+        self._along_base = self._spin(20.0)
+        form.addRow("Along base face (mm):", self._along_base)
+        self._along_wall = self._spin(20.0)
+        form.addRow("Along wall face (mm):", self._along_wall)
+        self._thickness = self._spin(6.0)
+        form.addRow("Thickness (mm):", self._thickness)
+        self._offset = self._spin(0.0, allow_negative=True)
+        form.addRow("Offset along shared edge (mm):", self._offset)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel,
+            parent=self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    @staticmethod
+    def _spin(default_value: float, *, allow_negative: bool = False) -> QDoubleSpinBox:
+        spin = QDoubleSpinBox()
+        spin.setDecimals(2)
+        spin.setRange(-1_000_000.0 if allow_negative else 0.001, 1_000_000.0)
+        spin.setValue(float(default_value))
+        spin.setSingleStep(0.5)
+        return spin
+
+    def parameters(self) -> dict[str, float]:
+        return {
+            "along_base": float(self._along_base.value()),
+            "along_wall": float(self._along_wall.value()),
+            "thickness": float(self._thickness.value()),
+            "offset": float(self._offset.value()),
+        }

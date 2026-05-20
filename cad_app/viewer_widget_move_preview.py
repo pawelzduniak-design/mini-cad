@@ -9,11 +9,15 @@ from cad_app.commands import (
     CommandError,
     chamfer_edge,
     extrude_face,
+    face_normal_vector,
     fillet_edge,
+    is_oblique_shear_body,
     move_edge_controlled,
     move_face_controlled,
+    move_face_oblique_shear,
     move_vertex_controlled,
     rotated_shape,
+    supports_move_face_oblique_shear,
     translated_shape,
 )
 from cad_app.sketch import extrude_profile
@@ -38,7 +42,17 @@ class ViewerWidgetMovePreviewMixin:
         except (CommandError, IndexError, ValueError) as exc:
             LOGGER.debug("Move preview failed: %s", exc, exc_info=True)
             self._viewer.clear_preview_marker()
+            self._note_move_preview_failed(self._move_session, distance)
             return
+        # Preview succeeded - remember this radius / distance as the
+        # latest known-good value so commit-time can suggest it.
+        self._move_session.last_successful_preview_distance = float(distance)
+        if self._move_session.last_preview_failed:
+            self._move_session.last_preview_failed = False
+            if self._move_session.tool in {"fillet", "chamfer", "fillet_chamfer"}:
+                self._show_status(
+                    f"Fillet/Chamfer feasible again at {abs(distance):.2f} mm"
+                )
         hide_original = self._move_session.tool in {
             "extrude",
             "sketch_extrude",
@@ -70,6 +84,28 @@ class ViewerWidgetMovePreviewMixin:
             ),
             hide_item_ids=(self._move_session.item_ids if hide_original else ()),
         )
+
+    def _note_move_preview_failed(self, session: MoveSession, distance: float) -> None:
+        """When fillet/chamfer preview silently fails the user sees the
+        original body and doesn't know they're past the feasible
+        radius. Surface a one-time status warning so the drag has
+        real-time feedback instead of going dark."""
+        if session.tool not in {"fillet", "chamfer", "fillet_chamfer"}:
+            return
+        if session.last_preview_failed:
+            return
+        session.last_preview_failed = True
+        last_ok = session.last_successful_preview_distance
+        if last_ok is not None:
+            self._show_status(
+                f"Fillet/Chamfer R={abs(distance):.2f} mm exceeds max for "
+                f"this edge (last working: {abs(last_ok):.2f} mm)"
+            )
+        else:
+            self._show_status(
+                f"Fillet/Chamfer R={abs(distance):.2f} mm too large for "
+                "this edge — try smaller"
+            )
 
     @staticmethod
     def _move_overlay_label(session: MoveSession) -> str:
@@ -209,12 +245,24 @@ class ViewerWidgetMovePreviewMixin:
                 dz,
             )
         if session.target_kind == SelectionKind.FACE:
+            shape = self._scene.get(session.item_id).shape
+            face_index = session.index
+            already_oblique = is_oblique_shear_body(shape, face_index)
             if session.axis_name == "Normal":
+                if already_oblique:
+                    nx, ny, nz = face_normal_vector(shape, face_index)
+                    return move_face_oblique_shear(
+                        shape,
+                        face_index,
+                        nx * session.distance,
+                        ny * session.distance,
+                        nz * session.distance,
+                    )
                 from cad_app.commands import move_face_normal
 
                 return move_face_normal(
-                    self._scene.get(session.item_id).shape,
-                    session.index,
+                    shape,
+                    face_index,
                     session.distance,
                 )
             dx, dy, dz = self._face_move_vector(session)
@@ -223,17 +271,25 @@ class ViewerWidgetMovePreviewMixin:
             # preview also works on curved-body shells where
             # move_face_controlled would fail (cylinder/torus caps).
             normal_distance = self._face_move_along_normal_distance(session, dx, dy, dz)
-            if normal_distance is not None:
+            if normal_distance is not None and not already_oblique:
                 from cad_app.commands import move_face_normal
 
                 return move_face_normal(
-                    self._scene.get(session.item_id).shape,
-                    session.index,
+                    shape,
+                    face_index,
                     normal_distance,
                 )
+            if supports_move_face_oblique_shear(shape, face_index):
+                return move_face_oblique_shear(
+                    shape,
+                    face_index,
+                    dx,
+                    dy,
+                    dz,
+                )
             return move_face_controlled(
-                self._scene.get(session.item_id).shape,
-                session.index,
+                shape,
+                face_index,
                 dx,
                 dy,
                 dz,

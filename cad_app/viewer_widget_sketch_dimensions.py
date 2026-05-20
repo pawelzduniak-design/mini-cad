@@ -66,7 +66,10 @@ class ViewerWidgetSketchDimensionsMixin(ViewerWidgetSketchDimensionUIMixin):
             face = TopoDS.Face_s(
                 self._picker.subshape(item_id, SelectionKind.FACE, face_index)
             )
-            workplane = Workplane.from_face(face)
+            if getattr(self, "_workplane_anchor", "centroid") == "corner":
+                workplane = Workplane.from_face_corner(face)
+            else:
+                workplane = Workplane.from_face(face)
             if self._selection_source == "browser" and is_sketch_profile(
                 selected_object.meta
             ):
@@ -277,9 +280,13 @@ class ViewerWidgetSketchDimensionsMixin(ViewerWidgetSketchDimensionUIMixin):
             self._sketch_session.drag_end_uv = None
             self._sketch_session.drag_dimensions = None
             self._hide_dimension_overlay()
+            self._update_sketch_snap_indicator(self._sketch_session)
             self._refresh_hud()
             return
         if preview is None:
+            # No shape to preview yet (e.g. line awaiting its first point),
+            # but still surface the snap target under the cursor.
+            self._update_sketch_snap_indicator(self._sketch_session)
             return
         shape, hud_label, overlay_label = preview
         self._sketch_session.drag_dimensions = hud_label
@@ -287,6 +294,9 @@ class ViewerWidgetSketchDimensionsMixin(ViewerWidgetSketchDimensionUIMixin):
             shape,
             self._workplane_normal_tuple(self._sketch_session.workplane),
         )
+        # Drawn after the preview marker because display_sketch_preview_marker
+        # clears the snap marker as part of clearing the preview.
+        self._update_sketch_snap_indicator(self._sketch_session)
         self._show_dimension_overlay(overlay_label, x, y)
         self._refresh_hud()
 
@@ -389,15 +399,28 @@ class ViewerWidgetSketchDimensionsMixin(ViewerWidgetSketchDimensionUIMixin):
     ) -> tuple[float, float] | None:
         if self._sketch_session is None:
             return None
+        session = self._sketch_session
         view_x, view_y = self._to_view_pixels(x, y)
         uv = project_screen_to_workplane(
             self._viewer.view,
             view_x,
             view_y,
-            self._sketch_session.workplane,
+            session.workplane,
         )
-        if uv is not None and snap:
-            uv = self._dimension_snapped_sketch_uv(self._sketch_session, uv)
+        if uv is None:
+            session.last_snap = None
+            return None
+        # Geometry snapping (vertices, edges, midpoints, other bodies,
+        # existing sketch points) is always on; the grid is only added
+        # while the snap modifier (Ctrl) is held. A geometric hit beats
+        # the modifier's dimension rounding.
+        snapped = self._resolve_sketch_snap(session, uv, x, y, include_grid=snap)
+        if snapped is not None:
+            session.last_snap = snapped
+            return snapped.uv
+        session.last_snap = None
+        if snap:
+            return self._dimension_snapped_sketch_uv(session, uv)
         return uv
 
     def _dimension_snapped_sketch_uv(

@@ -26,5 +26,8 @@ viewport content, nonblank screenshots, overlays, and mode clarity.
 .\run.ps1 visual
 ```
 
-`wglMakeCurrent() has failed` can appear during OCP/OpenGL teardown. Treat it as
-noise only when pytest exits passing and screenshots are valid.
+`wglMakeCurrent() has failed` can appear during Windows OCP/OpenGL teardown.
+Treat it as noise only when pytest exits passing and screenshots are valid.
+
+Linux support is work in progress and is not documented as a ready-to-use
+visual test target yet.

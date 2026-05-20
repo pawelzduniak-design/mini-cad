@@ -304,6 +304,25 @@ class ViewerWidgetStateMixin(ViewerWidgetStateSnapshotMixin):
         self._show_status(f"Display: {mode }")
         self._refresh_action_state()
 
+    def _toggle_workplane_anchor(self) -> None:
+        """Switch the face-workplane anchor between the centroid
+        (default) and the lowest-UV corner. Affects sketches started
+        on a planar face from this moment on; existing sketches keep
+        whatever anchor they were started with.
+        """
+        current = getattr(self, "_workplane_anchor", "centroid")
+        self._workplane_anchor = "corner" if current == "centroid" else "centroid"
+        if "toggle_workplane_corner_anchor" in self._actions:
+            self._actions["toggle_workplane_corner_anchor"].setChecked(
+                self._workplane_anchor == "corner"
+            )
+        self._show_status(
+            "Sketch anchor: face corner"
+            if self._workplane_anchor == "corner"
+            else "Sketch anchor: face centroid"
+        )
+        LOGGER.info("Workplane anchor set to %s", self._workplane_anchor)
+
     def _new_project(self, confirm: bool = True) -> None:
         if confirm and len(self._scene) > 0:
             from PySide6.QtWidgets import QMessageBox
@@ -406,13 +425,19 @@ class ViewerWidgetStateMixin(ViewerWidgetStateSnapshotMixin):
         x: int,
         y: int,
     ) -> tuple[str, bool, str] | None:
-        # Click → view target ONLY when the Qt overlay's own button
-        # rects or cube polygons identify a real target. The previous
-        # 3x3-grid fallback returned a target for every pixel inside
-        # the 156x156 gizmo rect, which collided with the real OCCT
-        # AIS_ViewCube rendered in the same corner: clicking the
-        # cube's visible Top face landed in an unrelated grid zone
-        # and produced "click Top, see Right" jumps.
+        # The Qt overlay's button + cube polygons are drawn for the
+        # default iso projection and never rotate. While the overlay
+        # is HIDDEN (the OCCT AIS_ViewCube is the visible gizmo and
+        # rotates with the camera), trusting the Qt static polygons
+        # would route clicks on the OCCT cube to whichever Qt zone
+        # happened to cover that pixel - the user would click the
+        # visible 'FRONT' face of the OCCT cube and the camera would
+        # snap to Top/Bottom/Right depending on where on screen OCCT
+        # had rendered FRONT after previous rotations. Return None
+        # here so the caller forwards the click to the OCCT cube,
+        # which owns the only correct face -> orientation mapping.
+        if not getattr(self, "_orientation_gizmo_overlay_visible", False):
+            return None
         left, top, _size = self._orientation_gizmo_rect()
         local_x = x - left
         local_y = y - top

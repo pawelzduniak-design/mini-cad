@@ -231,8 +231,29 @@ def mark_scene_item_feature_history_failed(
     scene.replace_shape(item_id, scene_object.shape, meta=next_meta)
 
 
-def feature_step_label(step: dict[str, Any], index: int) -> str:
+def feature_step_label(
+    step: dict[str, Any],
+    index: int,
+    *,
+    same_kind_index: int | None = None,
+) -> str:
+    """Build a browser label like ``"3. Sketch Cut 2: 8.00 mm"``.
+
+    ``index`` is the global position in the history. ``same_kind_index``
+    is the 1-based position within the same step *kind* (e.g. the
+    second cut feature → 2). When provided, it's appended to the name
+    so the browser shows ``Sketch Cut 1`` / ``Sketch Cut 2`` instead of
+    a single repeated label for every cut.
+    """
     name = str(step.get("name") or step.get("kind") or "Feature")
+    if step.get("kind") == "sketch_profile_feature":
+        # Distinguish add (boss) from subtract (cut/hole/pocket) by the
+        # sign of the captured distance — same convention extrude_face
+        # uses (positive = fuse outward, negative = cut into body).
+        distance = float(step.get("params", {}).get("distance", 0.0))
+        name = "Sketch Cut" if distance < 0 else "Sketch Boss"
+    if same_kind_index is not None:
+        name = f"{name} {same_kind_index}"
     return f"{index}. {name}: {_feature_step_summary(step)}"
 
 
