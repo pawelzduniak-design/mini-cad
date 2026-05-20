@@ -8,10 +8,11 @@ compact, hackable desktop CAD I could read end-to-end and bend around my own
 workflow: sketch → extrude → cut → move → fillet → save → export.
 
 <p align="center">
-  <!-- TODO: record the feature tour and drop feature_tour.gif at the repo root,
-       then replace the line below with:
-       <img src="feature_tour.gif" alt="mini-cad feature tour" width="760"> -->
-  <em>🎬 feature tour GIF — to be recorded (placeholder)</em>
+  <img src="docs/images/hero.png" alt="mini-cad — direct-modeling CAD" width="820">
+  <br>
+  <!-- A short feature-tour GIF can replace this still later:
+       <img src="feature_tour.gif" alt="mini-cad feature tour" width="820"> -->
+  <sub><em>Building a small structure: sketch → extrude → boolean, on the live grid.</em></sub>
 </p>
 
 ## ✓ What it does
