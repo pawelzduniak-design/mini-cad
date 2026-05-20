@@ -12,7 +12,7 @@ workflow: sketch → extrude → cut → move → fillet → save → export.
   <br>
   <!-- A short feature-tour GIF can replace this still later:
        <img src="feature_tour.gif" alt="mini-cad feature tour" width="820"> -->
-  <sub><em>Building a small structure: sketch → extrude → boolean, on the live grid.</em></sub>
+  <sub><em>Selection-first: pick a face, edge, or vertex and the matching tools light up.</em></sub>
 </p>
 
 ## ✓ What it does
