@@ -12,7 +12,9 @@ binaries = []
 hiddenimports = []
 
 # Heavy native/data-carrying deps that PyInstaller can't trace on its own.
-for pkg in ("OCP", "build123d", "cadquery", "shapely"):
+# PySide6 is intentionally left to PyInstaller's built-in hook so it bundles
+# only the imported Qt modules instead of the whole framework.
+for pkg in ("OCP", "build123d", "shapely"):
     try:
         pkg_datas, pkg_binaries, pkg_hidden = collect_all(pkg)
     except Exception:
@@ -32,7 +34,38 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
-    excludes=["tkinter", "pytest", "black", "ruff"],
+    excludes=[
+        "tkinter",
+        "pytest",
+        "black",
+        "ruff",
+        # VTK Python packages are unused; build123d only touches VTK for an
+        # optional export. (The native vtk.libs DLLs stay — OCP links them.)
+        "vtk",
+        "vtkmodules",
+        # Dev/optional libs pulled in transitively but unused at runtime.
+        "matplotlib",
+        "PIL",
+        "Pillow",
+        "jedi",
+        "IPython",
+        # Qt modules the app never imports (it's QtWidgets-only).
+        "PySide6.QtQml",
+        "PySide6.QtQuick",
+        "PySide6.QtQuick3D",
+        "PySide6.QtQuickWidgets",
+        "PySide6.QtPdf",
+        "PySide6.QtPdfWidgets",
+        "PySide6.QtNetwork",
+        "PySide6.QtMultimedia",
+        "PySide6.QtMultimediaWidgets",
+        "PySide6.QtCharts",
+        "PySide6.QtWebEngineCore",
+        "PySide6.QtWebEngineWidgets",
+        "PySide6.QtSql",
+        "PySide6.QtTest",
+        "PySide6.Qt3DCore",
+    ],
     cipher=block_cipher,
     noarchive=False,
 )

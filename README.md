@@ -60,8 +60,8 @@ The easy path — no Python needed:
 2. Unzip it anywhere.
 3. Run `mini-cad.exe`.
 
-It's a self-contained build, so the folder is large (~640 MB unzipped) and the
-first launch takes a few seconds while Windows scans it.
+It's a self-contained build (bundles the OCCT geometry kernel), so the download
+is ~165 MB and the first launch takes a few seconds while Windows scans it.
 
 ## Run from source
 
