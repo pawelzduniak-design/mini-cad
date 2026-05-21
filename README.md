@@ -71,8 +71,7 @@ py -3.11 -m venv .venv
 .\run.ps1 app
 ```
 
-…or, after install, the `cad-app` entry point. On Linux/macOS there's `./run.sh`
-(`./run.sh app`, `./run.sh check`, `./run.sh test`).
+…or, after install, the `cad-app` entry point.
 
 ## Layout
 
