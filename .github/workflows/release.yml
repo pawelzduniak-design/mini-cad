@@ -1,6 +1,8 @@
 name: Build Windows release
 
-# Push a tag like v0.1.0 to build the standalone exe and publish a Release.
+# Run manually (Actions tab -> "Run workflow") to test the build: it produces a
+# downloadable zip artifact but does NOT publish a release.
+# Push a tag like v0.1.0 to build AND publish a GitHub Release.
 on:
   push:
     tags:
@@ -32,7 +34,16 @@ jobs:
       - name: Zip
         run: Compress-Archive -Path dist/mini-cad/* -DestinationPath dist/mini-cad-windows.zip
 
+      # Manual/test runs: keep the zip as a downloadable artifact, no release.
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mini-cad-windows
+          path: dist/mini-cad-windows.zip
+
+      # Tag pushes only: publish the Release with the zip attached.
       - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: dist/mini-cad-windows.zip
