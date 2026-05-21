@@ -103,6 +103,18 @@ many small, explicit modeling operations over one big framework, so each
 feature is easy to find and change. Yes, it was built with heavy AI assistance;
 the contracts in `docs/` exist so behavior stays honest as it grows.
 
+## Credits — it's a wrapper, and that's the point
+
+To be upfront: **mini-cad is a thin UI on top of an existing geometry engine.**
+All the hard geometry — booleans, fillets, lofts, STEP import/export — is
+[OpenCASCADE (OCCT)](https://dev.opencascade.org/), reached through
+[`cadquery-ocp`](https://github.com/CadQuery/ocp-build-system) and
+[`build123d`](https://github.com/gumyr/build123d). None of the kernel math is
+mine. What's mine is the layer *around* it: the PySide6/Qt interface, the
+selection-first interaction model, snapping, the viewport wiring, and project
+save/load. So this isn't a new CAD engine — it's a no-friction front-end that
+lets OCCT do all the heavy lifting.
+
 ## Author
 
 Pawel Zduniak — MIT licensed, see [LICENSE](LICENSE).
