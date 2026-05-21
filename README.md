@@ -52,26 +52,41 @@ export, done — without fighting a heavyweight tool.
 | `Esc` | cancel | `Enter` | commit / finish sketch |
 | `Ctrl+Z` | undo | `Del` | delete selection |
 
-## Requirements
+## Download (Windows)
 
-- Python 3.10+ (3.11 recommended for the OCP wheels).
-- `PySide6`, `cadquery-ocp`, `build123d`, `shapely`.
+The easy path — no Python needed:
 
-## Install
+1. Grab `mini-cad-windows.zip` from the [latest release](../../releases/latest).
+2. Unzip it anywhere.
+3. Run `mini-cad.exe`.
+
+It's a self-contained build, so the folder is large (~640 MB unzipped) and the
+first launch takes a few seconds while Windows scans it.
+
+## Run from source
+
+For development, or to run on Python directly:
 
 ```powershell
 py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
-```
-
-## Run
-
-```powershell
 .\run.ps1 app
 ```
 
-…or, after install, the `cad-app` entry point.
+Needs Python 3.10+ (3.11 recommended for the OCP wheels); `pip install` pulls in
+`PySide6`, `cadquery-ocp`, `build123d`, and `shapely`. After install the
+`cad-app` entry point works too.
+
+## Build the exe yourself
+
+```powershell
+.\build_exe.ps1
+```
+
+This bundles everything with PyInstaller into `dist\mini-cad\` and packs
+`dist\mini-cad-windows.zip`. Pushing a `v*` tag runs the same build on CI and
+publishes a GitHub Release automatically.
 
 ## Layout
 
